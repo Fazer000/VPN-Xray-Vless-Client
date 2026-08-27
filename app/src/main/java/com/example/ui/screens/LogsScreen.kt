@@ -31,7 +31,9 @@ import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun LogsScreen() {
+fun LogsScreen(
+    onBack: (() -> Unit)? = null
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val logs by LogManager.logs.collectAsState()
@@ -52,7 +54,9 @@ fun LogsScreen() {
 
     LaunchedEffect(filteredLogs.size, autoScroll) {
         if (autoScroll && filteredLogs.isNotEmpty()) {
-            listState.animateScrollToItem(filteredLogs.size - 1)
+            try {
+                listState.scrollToItem(filteredLogs.size - 1)
+            } catch (_: Exception) {}
         }
     }
 
@@ -60,6 +64,13 @@ fun LogsScreen() {
         containerColor = CyberBackground,
         topBar = {
             TopAppBar(
+                navigationIcon = {
+                    if (onBack != null) {
+                        IconButton(onClick = onBack) {
+                            Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = TextPrimary)
+                        }
+                    }
+                },
                 title = {
                     Column {
                         Text(

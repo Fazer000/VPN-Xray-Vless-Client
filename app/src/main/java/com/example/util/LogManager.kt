@@ -6,13 +6,14 @@ import kotlinx.coroutines.flow.asStateFlow
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicLong
 
 enum class LogLevel {
     INFO, WARNING, ERROR, DEBUG
 }
 
 data class LogEntry(
-    val id: Long = System.currentTimeMillis() + (0..999).random(),
+    val id: Long,
     val timestamp: String = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).format(Date()),
     val level: LogLevel,
     val tag: String,
@@ -20,18 +21,25 @@ data class LogEntry(
 )
 
 object LogManager {
+    private val idSequence = AtomicLong(1L)
     private val _logs = MutableStateFlow<List<LogEntry>>(emptyList())
     val logs: StateFlow<List<LogEntry>> = _logs.asStateFlow()
 
-    private const val MAX_LOGS = 2000
+    private const val MAX_LOGS = 1000
 
     fun i(tag: String, message: String) = log(LogLevel.INFO, tag, message)
     fun w(tag: String, message: String) = log(LogLevel.WARNING, tag, message)
     fun e(tag: String, message: String) = log(LogLevel.ERROR, tag, message)
     fun d(tag: String, message: String) = log(LogLevel.DEBUG, tag, message)
 
+    @Synchronized
     fun log(level: LogLevel, tag: String, message: String) {
-        val entry = LogEntry(level = level, tag = tag, message = message)
+        val entry = LogEntry(
+            id = idSequence.getAndIncrement(),
+            level = level,
+            tag = tag,
+            message = message
+        )
         val current = _logs.value.toMutableList()
         current.add(entry)
         if (current.size > MAX_LOGS) {
@@ -40,7 +48,9 @@ object LogManager {
         _logs.value = current
     }
 
+    @Synchronized
     fun clear() {
         _logs.value = emptyList()
     }
 }
+

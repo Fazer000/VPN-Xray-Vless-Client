@@ -36,7 +36,8 @@ import com.example.vpn.XrayVpnService
 fun HomeScreen(
     viewModel: VpnViewModel,
     onNavigateToServers: () -> Unit,
-    onNavigateToSplitTunnel: () -> Unit
+    onNavigateToSplitTunnel: () -> Unit,
+    onNavigateToSettings: () -> Unit
 ) {
     val context = LocalContext.current
     val vpnState by viewModel.vpnState.collectAsState()
@@ -129,6 +130,17 @@ fun HomeScreen(
                             tint = CyberCyan
                         )
                     }
+                }
+
+                IconButton(
+                    onClick = onNavigateToSettings,
+                    modifier = Modifier.testTag("home_settings_btn")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Settings,
+                        contentDescription = "Settings",
+                        tint = CyberCyan
+                    )
                 }
 
                 Spacer(modifier = Modifier.width(4.dp))

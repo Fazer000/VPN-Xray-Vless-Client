@@ -23,6 +23,7 @@ import androidx.navigation.compose.rememberNavController
 import com.example.ui.screens.HomeScreen
 import com.example.ui.screens.LogsScreen
 import com.example.ui.screens.ServersScreen
+import com.example.ui.screens.SettingsScreen
 import com.example.ui.screens.SplitTunnelingScreen
 import com.example.ui.screens.SubscriptionsScreen
 import com.example.ui.theme.*
@@ -128,6 +129,9 @@ fun MainAppScreen(viewModel: VpnViewModel) {
                     },
                     onNavigateToSplitTunnel = {
                         navController.navigate(NavItem.Split.route)
+                    },
+                    onNavigateToSettings = {
+                        navController.navigate("settings")
                     }
                 )
             }
@@ -150,7 +154,21 @@ fun MainAppScreen(viewModel: VpnViewModel) {
             }
 
             composable(NavItem.Logs.route) {
-                LogsScreen()
+                LogsScreen(
+                    onBack = if (navController.previousBackStackEntry != null) {
+                        { navController.popBackStack() }
+                    } else null
+                )
+            }
+
+            composable("settings") {
+                SettingsScreen(
+                    viewModel = viewModel,
+                    onBack = { navController.popBackStack() },
+                    onNavigateToLogs = { navController.navigate(NavItem.Logs.route) },
+                    onNavigateToSplitTunnel = { navController.navigate(NavItem.Split.route) },
+                    onNavigateToSubscriptions = { navController.navigate(NavItem.Subscriptions.route) }
+                )
             }
         }
     }

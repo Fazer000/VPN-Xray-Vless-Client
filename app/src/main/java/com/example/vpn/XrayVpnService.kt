@@ -26,6 +26,8 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.ByteArrayOutputStream
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.InputStream
+import java.io.OutputStream
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
@@ -638,14 +640,17 @@ class XrayVpnService : VpnService() {
         rawSocket.tcpNoDelay = true
         rawSocket.connect(InetSocketAddress(serverHost, serverPort), 7000)
 
-        val socket = if (serverSecurity.equals("tls", ignoreCase = true) || serverSecurity.equals("reality", ignoreCase = true) || serverPort == 443) {
+        val tlsSocket = if (serverSecurity.equals("tls", ignoreCase = true) || serverSecurity.equals("reality", ignoreCase = true) || serverPort == 443) {
             createTlsSocket(rawSocket, serverHost, serverPort, serverSni)
         } else {
             rawSocket
         }
 
-        if (serverNetwork.equals("ws", ignoreCase = true)) {
-            performWsUpgrade(socket, serverHost, serverPath, serverSni)
+        val socket = if (serverNetwork.equals("ws", ignoreCase = true)) {
+            performWsUpgrade(tlsSocket, serverHost, serverPath, serverSni)
+            WebSocketStreamSocket(tlsSocket)
+        } else {
+            tlsSocket
         }
 
         val out = socket.getOutputStream()
@@ -700,14 +705,17 @@ class XrayVpnService : VpnService() {
         rawSocket.tcpNoDelay = true
         rawSocket.connect(InetSocketAddress(serverHost, serverPort), 7000)
 
-        val socket = if (serverSecurity.equals("none", ignoreCase = true)) {
+        val tlsSocket = if (serverSecurity.equals("none", ignoreCase = true)) {
             rawSocket
         } else {
             createTlsSocket(rawSocket, serverHost, serverPort, serverSni)
         }
 
-        if (serverNetwork.equals("ws", ignoreCase = true)) {
-            performWsUpgrade(socket, serverHost, serverPath, serverSni)
+        val socket = if (serverNetwork.equals("ws", ignoreCase = true)) {
+            performWsUpgrade(tlsSocket, serverHost, serverPath, serverSni)
+            WebSocketStreamSocket(tlsSocket)
+        } else {
+            tlsSocket
         }
 
         val out = socket.getOutputStream()
@@ -839,8 +847,26 @@ class XrayVpnService : VpnService() {
         return sslSocket
     }
 
+    private fun readHttpResponseHeader(input: InputStream): String {
+        val bos = ByteArrayOutputStream()
+        var state = 0
+        while (true) {
+            val b = input.read()
+            if (b == -1) break
+            bos.write(b)
+            if (state == 0 && b == 13) state = 1
+            else if (state == 1 && b == 10) state = 2
+            else if (state == 2 && b == 13) state = 3
+            else if (state == 3 && b == 10) break
+            else if (b == 13) state = 1
+            else state = 0
+        }
+        return bos.toString("UTF-8")
+    }
+
     private fun performWsUpgrade(socket: Socket, host: String, path: String, sni: String) {
-        val wsPath = if (path.startsWith("/")) path else "/$path"
+        val cleanPath = try { java.net.URLDecoder.decode(path, "UTF-8") } catch (_: Exception) { path }
+        val wsPath = if (cleanPath.startsWith("/")) cleanPath else "/$cleanPath"
         val wsHost = if (sni.isNotEmpty()) sni else host
         val key = android.util.Base64.encodeToString(ByteArray(16).also { java.security.SecureRandom().nextBytes(it) }, android.util.Base64.NO_WRAP)
 
@@ -856,14 +882,10 @@ class XrayVpnService : VpnService() {
         out.write(req.toByteArray(Charsets.UTF_8))
         out.flush()
 
-        val reader = java.io.BufferedReader(java.io.InputStreamReader(socket.getInputStream(), Charsets.UTF_8))
-        val firstLine = reader.readLine() ?: ""
-        if (!firstLine.contains("101")) {
+        val headerStr = readHttpResponseHeader(socket.getInputStream())
+        if (!headerStr.contains("101")) {
+            val firstLine = headerStr.lines().firstOrNull() ?: ""
             throw Exception("WebSocket Handshake failed: $firstLine")
-        }
-        while (true) {
-            val line = reader.readLine()
-            if (line.isNullOrEmpty()) break
         }
     }
 
@@ -889,6 +911,10 @@ class XrayVpnService : VpnService() {
     }
 
     private fun writeAddressAndPort(bos: ByteArrayOutputStream, host: String, port: Int) {
+        // VLESS Specification: Port (2 bytes uint16) comes BEFORE Address Type
+        bos.write((port ushr 8) and 0xFF)
+        bos.write(port and 0xFF)
+
         val ipBytes = try { InetAddress.getByName(host).address } catch (_: Exception) { null }
         if (ipBytes != null && ipBytes.size == 4) {
             bos.write(1) // IPv4
@@ -902,8 +928,6 @@ class XrayVpnService : VpnService() {
             bos.write(domainBytes.size)
             bos.write(domainBytes)
         }
-        bos.write((port ushr 8) and 0xFF)
-        bos.write(port and 0xFF)
     }
 
     private fun sha224Hex(input: String): String {
@@ -1263,5 +1287,149 @@ class XrayVpnService : VpnService() {
         stopVpnTunnel()
         serviceScope.cancel()
         super.onDestroy()
+    }
+}
+
+class WebSocketStreamSocket(private val delegate: Socket) : Socket() {
+    private val inStream = WebSocketInputStream(delegate.getInputStream())
+    private val outStream = WebSocketOutputStream(delegate.getOutputStream())
+
+    override fun getInputStream(): InputStream = inStream
+    override fun getOutputStream(): OutputStream = outStream
+    override fun isConnected(): Boolean = delegate.isConnected
+    override fun isClosed(): Boolean = delegate.isClosed
+    override fun close() {
+        try { delegate.close() } catch (_: Exception) {}
+    }
+}
+
+class WebSocketOutputStream(private val delegateOut: OutputStream) : OutputStream() {
+    private val random = java.security.SecureRandom()
+
+    override fun write(b: Int) {
+        write(byteArrayOf(b.toByte()), 0, 1)
+    }
+
+    override fun write(b: ByteArray, off: Int, len: Int) {
+        if (len <= 0) return
+        val bos = ByteArrayOutputStream()
+        bos.write(0x82) // FIN + Opcode 2 (Binary)
+
+        val maskKey = ByteArray(4)
+        random.nextBytes(maskKey)
+
+        if (len <= 125) {
+            bos.write(0x80 or len)
+        } else if (len <= 65535) {
+            bos.write(0x80 or 126)
+            bos.write((len ushr 8) and 0xFF)
+            bos.write(len and 0xFF)
+        } else {
+            bos.write(0x80 or 127)
+            for (i in 7 downTo 0) {
+                bos.write(((len.toLong() ushr (i * 8)) and 0xFF).toInt())
+            }
+        }
+
+        bos.write(maskKey)
+
+        for (i in 0 until len) {
+            val masked = (b[off + i].toInt() xor maskKey[i % 4].toInt()).toByte()
+            bos.write(masked.toInt())
+        }
+
+        synchronized(delegateOut) {
+            delegateOut.write(bos.toByteArray())
+            delegateOut.flush()
+        }
+    }
+
+    override fun flush() {
+        delegateOut.flush()
+    }
+}
+
+class WebSocketInputStream(private val delegateIn: InputStream) : InputStream() {
+    private var bufferBytes = ByteArray(0)
+    private var bufferPos = 0
+
+    override fun read(): Int {
+        val b = ByteArray(1)
+        val read = read(b, 0, 1)
+        return if (read > 0) b[0].toInt() and 0xFF else -1
+    }
+
+    override fun read(b: ByteArray, off: Int, len: Int): Int {
+        if (len <= 0) return 0
+        if (bufferPos >= bufferBytes.size) {
+            if (!readNextFrame()) return -1
+        }
+        val available = bufferBytes.size - bufferPos
+        val toCopy = Math.min(len, available)
+        System.arraycopy(bufferBytes, bufferPos, b, off, toCopy)
+        bufferPos += toCopy
+        return toCopy
+    }
+
+    private fun readNextFrame(): Boolean {
+        bufferPos = 0
+        while (true) {
+            val b0 = delegateIn.read()
+            if (b0 == -1) return false
+            val opcode = b0 and 0x0F
+
+            val b1 = delegateIn.read()
+            if (b1 == -1) return false
+            val isMasked = (b1 and 0x80) != 0
+            var payloadLen = (b1 and 0x7F).toLong()
+
+            if (payloadLen == 126L) {
+                val b2 = delegateIn.read()
+                val b3 = delegateIn.read()
+                if (b2 == -1 || b3 == -1) return false
+                payloadLen = (((b2 and 0xFF) shl 8) or (b3 and 0xFF)).toLong()
+            } else if (payloadLen == 127L) {
+                var len = 0L
+                for (i in 0 until 8) {
+                    val b = delegateIn.read()
+                    if (b == -1) return false
+                    len = (len shl 8) or (b and 0xFF).toLong()
+                }
+                payloadLen = len
+            }
+
+            val maskKey = ByteArray(4)
+            if (isMasked) {
+                var readMask = 0
+                while (readMask < 4) {
+                    val r = delegateIn.read(maskKey, readMask, 4 - readMask)
+                    if (r <= 0) return false
+                    readMask += r
+                }
+            }
+
+            val payload = ByteArray(payloadLen.toInt())
+            var readPayload = 0
+            while (readPayload < payloadLen.toInt()) {
+                val r = delegateIn.read(payload, readPayload, payloadLen.toInt() - readPayload)
+                if (r <= 0) return false
+                readPayload += r
+            }
+
+            if (isMasked) {
+                for (i in 0 until payload.size) {
+                    payload[i] = (payload[i].toInt() xor maskKey[i % 4].toInt()).toByte()
+                }
+            }
+
+            if (opcode == 0x8) { // Close
+                return false
+            } else if (opcode == 0x9) { // Ping
+                continue
+            } else if (opcode == 0x1 || opcode == 0x2 || opcode == 0x0) { // Text/Binary/Continuation
+                bufferBytes = payload
+                return true
+            }
+        }
     }
 }
