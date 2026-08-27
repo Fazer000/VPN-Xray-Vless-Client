@@ -151,11 +151,11 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun addSubscription(url: String, name: String = "", customUserAgent: String = "") {
+    fun addSubscription(url: String, name: String = "") {
         viewModelScope.launch {
             _isSubLoading.value = true
             _subStateMessage.value = "Загрузка подписки..."
-            val result = repository.addSubscription(url, name, customUserAgent)
+            val result = repository.addSubscription(url, name)
             _isSubLoading.value = false
             result.onSuccess {
                 _subStateMessage.value = "Подписка успешно обновлена (${it.serverCount} серверов)."

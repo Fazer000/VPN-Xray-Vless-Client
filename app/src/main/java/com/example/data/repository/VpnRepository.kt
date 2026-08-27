@@ -61,7 +61,7 @@ class VpnRepository(private val context: Context) {
         } catch (_: Exception) {}
     }
 
-    suspend fun addSubscription(url: String, customName: String = "", customUserAgent: String = ""): Result<Subscription> = withContext(Dispatchers.IO) {
+    suspend fun addSubscription(url: String, customName: String = ""): Result<Subscription> = withContext(Dispatchers.IO) {
         try {
             val trimmedUrl = url.trim()
             val subId = UUID.nameUUIDFromBytes(trimmedUrl.toByteArray()).toString()
@@ -79,69 +79,59 @@ class VpnRepository(private val context: Context) {
                 }
             } else {
                 // Remote subscription URL download
-                val userAgentsToTry = if (customUserAgent.isNotBlank()) {
-                    listOf(customUserAgent)
-                } else {
-                    listOf(
-                        "v2rayTun",
-                        "v2rayTun/1.5.8",
-                        "v2rayNG/1.8.19",
-                        "v2rayNG/1.8.5",
-                        "Happ/1.2.0",
-                        "Happ",
-                        "sing-box/1.8.0",
-                        "sing-box",
-                        "Clash.Meta",
-                        "Clash/1.18.0",
-                        "NekoBox/1.3.0",
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                    )
-                }
+                val deviceModel = android.os.Build.MODEL.ifBlank { "Android Device" }
+                val verOs = android.os.Build.VERSION.RELEASE.ifBlank { "13" }
+                val locale = java.util.Locale.getDefault().language.ifBlank { "ru" }
 
                 var lastErrorMessage = ""
 
-                for (ua in userAgentsToTry) {
-                    try {
-                        val request = Request.Builder()
-                            .url(trimmedUrl)
-                            .header("User-Agent", ua)
-                            .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.7")
-                            .header("Accept-Language", "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7")
-                            .header("Cache-Control", "no-cache")
-                            .build()
+                try {
+                    val request = Request.Builder()
+                        .url(trimmedUrl)
+                        .header("User-Agent", "Happ/3.13.0")
+                        .header("X-Device-Os", "Android")
+                        .header("X-Device-Locale", if (locale.isNotBlank()) locale else "ru")
+                        .header("X-Device-Model", deviceModel)
+                        .header("X-Ver-Os", verOs)
+                        .header("X-Hwid", "74jf74nf8f4jr5je")
+                        .header("Accept-Encoding", "gzip")
+                        .header("Connection", "keep-alive")
+                        .build()
 
-                        val response = httpClient.newCall(request).execute()
-                        if (!response.isSuccessful) {
-                            lastErrorMessage = "HTTP ${response.code} ($ua)"
-                            continue
+                    val response = httpClient.newCall(request).execute()
+                    if (!response.isSuccessful) {
+                        lastErrorMessage = "HTTP ${response.code}"
+                    } else {
+                        val rawBytes = response.body?.bytes() ?: byteArrayOf()
+                        val body = try {
+                            if (rawBytes.size >= 2 && rawBytes[0] == 0x1f.toByte() && rawBytes[1] == 0x8b.toByte()) {
+                                java.io.InputStreamReader(java.util.zip.GZIPInputStream(rawBytes.inputStream()), Charsets.UTF_8).readText()
+                            } else {
+                                String(rawBytes, Charsets.UTF_8)
+                            }
+                        } catch (_: Exception) {
+                            String(rawBytes, Charsets.UTF_8)
                         }
 
-                        val body = response.body?.string() ?: ""
-                        if (body.isBlank()) continue
-
-                        // Try parsing servers first before flagging as error body
-                        val servers = ProtocolParser.parseSubscriptionContent(body, subId, name)
-                        if (servers.isNotEmpty()) {
-                            parsedServers = servers
-                            break
-                        } else {
-                            if (ProtocolParser.isHtmlOrErrorBody(body)) {
-                                lastErrorMessage = "Панель подписки отклонила клиент ($ua)."
+                        if (body.isNotBlank()) {
+                            val servers = ProtocolParser.parseSubscriptionContent(body, subId, name)
+                            if (servers.isNotEmpty()) {
+                                parsedServers = servers
                             } else {
-                                lastErrorMessage = "Не найдены серверы в ответе от подписки ($ua)"
+                                if (ProtocolParser.isHtmlOrErrorBody(body)) {
+                                    lastErrorMessage = "Панель подписки отклонила клиент."
+                                } else {
+                                    lastErrorMessage = "Не найдены серверы в ответе от подписки."
+                                }
                             }
                         }
-                    } catch (e: Exception) {
-                        lastErrorMessage = "Ошибка подписки ($ua): ${e.localizedMessage}"
                     }
+                } catch (e: Exception) {
+                    lastErrorMessage = "Ошибка подписки: ${e.localizedMessage}"
                 }
 
                 if (parsedServers.isEmpty()) {
-                    val errorReason = if (lastErrorMessage.contains("отклонила")) {
-                        "Не удалось загрузить подписку. Панель запросила специфический клиент. Попробуйте указать кастомный User-Agent в настройках подписки."
-                    } else {
-                        lastErrorMessage.ifEmpty { "Не найдено действительных конфигураций в подписке." }
-                    }
+                    val errorReason = lastErrorMessage.ifEmpty { "Не найдено действительных конфигураций в подписке." }
                     return@withContext Result.failure(Exception(errorReason))
                 }
             }

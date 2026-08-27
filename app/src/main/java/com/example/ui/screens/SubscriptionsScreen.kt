@@ -156,8 +156,8 @@ fun SubscriptionsScreen(
     if (showAddDialog) {
         AddSubscriptionDialog(
             onDismiss = { showAddDialog = false },
-            onAdd = { url, name, userAgent ->
-                viewModel.addSubscription(url, name, userAgent)
+            onAdd = { url, name ->
+                viewModel.addSubscription(url, name)
                 showAddDialog = false
             }
         )
@@ -270,19 +270,10 @@ fun SubscriptionCard(
 @Composable
 fun AddSubscriptionDialog(
     onDismiss: () -> Unit,
-    onAdd: (url: String, name: String, userAgent: String) -> Unit
+    onAdd: (url: String, name: String) -> Unit
 ) {
     var urlText by remember { mutableStateOf("") }
     var nameText by remember { mutableStateOf("") }
-
-    val userAgentOptions = listOf(
-        "Auto (Happ / v2rayTun / v2rayNG)" to "",
-        "v2rayNG" to "v2rayNG/1.8.19 (Android; com.v2ray.ang)",
-        "Happ" to "Happ/1.2.0 (Android; com.happ.vpn)",
-        "v2rayTun" to "v2rayTun/1.5.8 (Android; com.v2raytun.android)",
-        "Clash" to "ClashforWindows/0.20.39"
-    )
-    var selectedUaIndex by remember { mutableIntStateOf(0) }
 
     val sampleUrl = "https://raw.githubusercontent.com/v2fly/fakedata/main/sub.txt"
 
@@ -329,33 +320,11 @@ fun AddSubscriptionDialog(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(10.dp)
                 )
-
-                Spacer(modifier = Modifier.height(12.dp))
-
-                Text("Эмуляция клиента (User-Agent):", fontSize = 13.sp, color = TextSecondary)
-                Spacer(modifier = Modifier.height(6.dp))
-
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    userAgentOptions.forEachIndexed { index, (label, _) ->
-                        FilterChip(
-                            selected = selectedUaIndex == index,
-                            onClick = { selectedUaIndex = index },
-                            label = { Text(label, fontSize = 12.sp) },
-                            colors = FilterChipDefaults.filterChipColors(
-                                selectedContainerColor = CyberCyan,
-                                selectedLabelColor = Color.Black,
-                                containerColor = CyberSurfaceVariant,
-                                labelColor = TextPrimary
-                            ),
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                    }
-                }
             }
         },
         confirmButton = {
             Button(
-                onClick = { onAdd(urlText, nameText, userAgentOptions[selectedUaIndex].second) },
+                onClick = { onAdd(urlText, nameText) },
                 enabled = urlText.isNotBlank(),
                 colors = ButtonDefaults.buttonColors(containerColor = CyberCyan, contentColor = Color.Black),
                 modifier = Modifier.testTag("confirm_add_sub_btn")
