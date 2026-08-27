@@ -38,6 +38,14 @@ class XrayVpnService : VpnService() {
         const val EXTRA_SERVER_ID = "extra_server_id"
         const val EXTRA_SERVER_NAME = "extra_server_name"
         const val EXTRA_SERVER_HOST = "extra_server_host"
+        const val EXTRA_SERVER_PORT = "extra_server_port"
+        const val EXTRA_SERVER_PROTOCOL = "extra_server_protocol"
+        const val EXTRA_SERVER_UUID = "extra_server_uuid"
+        const val EXTRA_SERVER_SECURITY = "extra_server_security"
+        const val EXTRA_SERVER_NETWORK = "extra_server_network"
+        const val EXTRA_SERVER_PATH = "extra_server_path"
+        const val EXTRA_SERVER_SNI = "extra_server_sni"
+        const val EXTRA_SERVER_RAW_LINK = "extra_server_raw_link"
         const val EXTRA_SPLIT_TUNNEL_ENABLED = "extra_split_tunnel_enabled"
         const val EXTRA_SPLIT_MODE = "extra_split_mode" // "PROXY" or "BYPASS"
 
@@ -65,6 +73,19 @@ class XrayVpnService : VpnService() {
     private var serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob() + coroutineExceptionHandler)
     private var connectionJob: Job? = null
 
+    private val totalRxBytes = java.util.concurrent.atomic.AtomicLong(0L)
+    private val totalTxBytes = java.util.concurrent.atomic.AtomicLong(0L)
+
+    private fun addTxBytes(bytes: Long) {
+        val newTx = totalTxBytes.addAndGet(bytes)
+        _txBytes.value = newTx
+    }
+
+    private fun addRxBytes(bytes: Long) {
+        val newRx = totalRxBytes.addAndGet(bytes)
+        _rxBytes.value = newRx
+    }
+
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
@@ -73,19 +94,23 @@ class XrayVpnService : VpnService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val serverName = intent?.getStringExtra(EXTRA_SERVER_NAME) ?: _activeServerName.value.ifEmpty { "Xray Server" }
 
-        // Always promote to foreground immediately to fulfill ForegroundService contract
         safeStartForeground(buildNotification("Processing request..."))
 
         when (intent?.action) {
             ACTION_CONNECT -> {
                 val serverId = intent.getStringExtra(EXTRA_SERVER_ID) ?: ""
                 val serverHost = intent.getStringExtra(EXTRA_SERVER_HOST) ?: "127.0.0.1"
+                val serverPort = intent.getIntExtra(EXTRA_SERVER_PORT, 443)
+                val serverProtocol = intent.getStringExtra(EXTRA_SERVER_PROTOCOL) ?: "VLESS"
+                val serverUuid = intent.getStringExtra(EXTRA_SERVER_UUID) ?: ""
+                val serverSecurity = intent.getStringExtra(EXTRA_SERVER_SECURITY) ?: "tls"
+                val serverSni = intent.getStringExtra(EXTRA_SERVER_SNI) ?: ""
                 val splitEnabled = intent.getBooleanExtra(EXTRA_SPLIT_TUNNEL_ENABLED, false)
                 val splitMode = intent.getStringExtra(EXTRA_SPLIT_MODE) ?: "PROXY"
 
                 _activeServerName.value = serverName
                 safeStartForeground(buildNotification("Connecting to $serverName..."))
-                startVpnTunnel(serverName, serverHost, splitEnabled, splitMode)
+                startVpnTunnel(serverName, serverHost, serverPort, serverProtocol, serverUuid, serverSecurity, serverSni, splitEnabled, splitMode)
             }
             ACTION_DISCONNECT -> {
                 safeStartForeground(buildNotification("Disconnecting..."))
@@ -106,9 +131,23 @@ class XrayVpnService : VpnService() {
         }
     }
 
-    private fun startVpnTunnel(serverName: String, serverHost: String, splitEnabled: Boolean, splitMode: String) {
+    private fun startVpnTunnel(
+        serverName: String,
+        serverHost: String,
+        serverPort: Int,
+        serverProtocol: String,
+        serverUuid: String,
+        serverSecurity: String,
+        serverSni: String,
+        splitEnabled: Boolean,
+        splitMode: String
+    ) {
         connectionJob?.cancel()
         _vpnState.value = State.CONNECTING
+        totalRxBytes.set(0L)
+        totalTxBytes.set(0L)
+        _rxBytes.value = 0L
+        _txBytes.value = 0L
 
         connectionJob = serviceScope.launch {
             try {
@@ -120,7 +159,7 @@ class XrayVpnService : VpnService() {
                     .addDnsServer("8.8.8.8")
                     .setMtu(1500)
 
-                // CRITICAL: Always disallow our own package so the app itself, ping tests, and updates bypass TUN and maintain internet connectivity
+                // Always disallow our own package so the app itself, ping tests, and updates bypass TUN
                 try {
                     builder.addDisallowedApplication(packageName)
                     Log.d("XrayVpnService", "Disallowed self app package: $packageName")
@@ -180,18 +219,7 @@ class XrayVpnService : VpnService() {
                 // Start TUN packet handling loop for DNS queries, ICMP pings, and traffic relay
                 val input = FileInputStream(pfd.fileDescriptor)
                 val output = FileOutputStream(pfd.fileDescriptor)
-                startTunPacketRelay(input, output)
-
-                var currentRx = 0L
-                var currentTx = 0L
-
-                while (isActive && _vpnState.value == State.CONNECTED) {
-                    delay(1000)
-                    currentRx += (24500..89200).random()
-                    currentTx += (8200..34100).random()
-                    _rxBytes.value = currentRx
-                    _txBytes.value = currentTx
-                }
+                startTunPacketRelay(input, output, serverHost, serverPort, serverProtocol, serverUuid, serverSecurity, serverSni)
 
             } catch (e: Exception) {
                 Log.e("XrayVpnService", "VPN Error: ${e.message}", e)
@@ -212,6 +240,8 @@ class XrayVpnService : VpnService() {
         }
         vpnInterface = null
         _vpnState.value = State.DISCONNECTED
+        totalRxBytes.set(0L)
+        totalTxBytes.set(0L)
         _rxBytes.value = 0L
         _txBytes.value = 0L
         safeStopForeground()
@@ -284,7 +314,16 @@ class XrayVpnService : VpnService() {
         }
     }
 
-    private fun startTunPacketRelay(input: FileInputStream, output: FileOutputStream) {
+    private fun startTunPacketRelay(
+        input: FileInputStream,
+        output: FileOutputStream,
+        serverHost: String,
+        serverPort: Int,
+        serverProtocol: String,
+        serverUuid: String,
+        serverSecurity: String,
+        serverSni: String
+    ) {
         serviceScope.launch(Dispatchers.IO) {
             val buffer = ByteArray(32768)
             while (isActive && _vpnState.value == State.CONNECTED) {
@@ -294,6 +333,9 @@ class XrayVpnService : VpnService() {
                         delay(10)
                         continue
                     }
+
+                    // Count real outgoing byte traffic from device
+                    addTxBytes(length.toLong())
 
                     val ipVersion = (buffer[0].toInt() and 0xF0) shr 4
                     if (ipVersion != 4 || length < 20) continue
@@ -367,6 +409,7 @@ class XrayVpnService : VpnService() {
             synchronized(output) {
                 output.write(reply, 0, length)
             }
+            addRxBytes(length.toLong())
         } catch (e: Exception) {
             Log.e("XrayVpnService", "ICMP reply error: ${e.message}")
         }
@@ -430,6 +473,7 @@ class XrayVpnService : VpnService() {
                     synchronized(output) {
                         output.write(responsePacket)
                     }
+                    addRxBytes(responsePacket.size.toLong())
                 }
             } catch (e: Exception) {
                 Log.d("XrayVpnService", "DNS forward error: ${e.message}")
