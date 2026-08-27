@@ -104,13 +104,15 @@ class XrayVpnService : VpnService() {
                 val serverProtocol = intent.getStringExtra(EXTRA_SERVER_PROTOCOL) ?: "VLESS"
                 val serverUuid = intent.getStringExtra(EXTRA_SERVER_UUID) ?: ""
                 val serverSecurity = intent.getStringExtra(EXTRA_SERVER_SECURITY) ?: "tls"
+                val serverNetwork = intent.getStringExtra(EXTRA_SERVER_NETWORK) ?: "tcp"
+                val serverPath = intent.getStringExtra(EXTRA_SERVER_PATH) ?: ""
                 val serverSni = intent.getStringExtra(EXTRA_SERVER_SNI) ?: ""
                 val splitEnabled = intent.getBooleanExtra(EXTRA_SPLIT_TUNNEL_ENABLED, false)
                 val splitMode = intent.getStringExtra(EXTRA_SPLIT_MODE) ?: "PROXY"
 
                 _activeServerName.value = serverName
                 safeStartForeground(buildNotification("Connecting to $serverName..."))
-                startVpnTunnel(serverName, serverHost, serverPort, serverProtocol, serverUuid, serverSecurity, serverSni, splitEnabled, splitMode)
+                startVpnTunnel(serverName, serverHost, serverPort, serverProtocol, serverUuid, serverSecurity, serverNetwork, serverPath, serverSni, splitEnabled, splitMode)
             }
             ACTION_DISCONNECT -> {
                 safeStartForeground(buildNotification("Disconnecting..."))
@@ -138,6 +140,8 @@ class XrayVpnService : VpnService() {
         serverProtocol: String,
         serverUuid: String,
         serverSecurity: String,
+        serverNetwork: String,
+        serverPath: String,
         serverSni: String,
         splitEnabled: Boolean,
         splitMode: String
@@ -219,7 +223,7 @@ class XrayVpnService : VpnService() {
                 // Start TUN packet handling loop for DNS queries, ICMP pings, and traffic relay
                 val input = FileInputStream(pfd.fileDescriptor)
                 val output = FileOutputStream(pfd.fileDescriptor)
-                startTunPacketRelay(input, output, serverHost, serverPort, serverProtocol, serverUuid, serverSecurity, serverSni)
+                startTunPacketRelay(input, output, serverHost, serverPort, serverProtocol, serverUuid, serverSecurity, serverNetwork, serverPath, serverSni)
 
             } catch (e: Exception) {
                 Log.e("XrayVpnService", "VPN Error: ${e.message}", e)
@@ -322,6 +326,8 @@ class XrayVpnService : VpnService() {
         serverProtocol: String,
         serverUuid: String,
         serverSecurity: String,
+        serverNetwork: String,
+        serverPath: String,
         serverSni: String
     ) {
         serviceScope.launch(Dispatchers.IO) {
