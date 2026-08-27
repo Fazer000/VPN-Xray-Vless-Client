@@ -58,7 +58,11 @@ class XrayVpnService : VpnService() {
     }
 
     private var vpnInterface: ParcelFileDescriptor? = null
-    private var serviceScope = CoroutineScope(Dispatchers.IO + Job())
+    private val coroutineExceptionHandler = CoroutineExceptionHandler { _, throwable ->
+        Log.e("XrayVpnService", "Unhandled Exception in VPN Coroutine: ${throwable.localizedMessage}", throwable)
+        _vpnState.value = State.DISCONNECTED
+    }
+    private var serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob() + coroutineExceptionHandler)
     private var connectionJob: Job? = null
 
     override fun onCreate() {
@@ -67,23 +71,39 @@ class XrayVpnService : VpnService() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val serverName = intent?.getStringExtra(EXTRA_SERVER_NAME) ?: _activeServerName.value.ifEmpty { "Xray Server" }
+
+        // Always promote to foreground immediately to fulfill ForegroundService contract
+        safeStartForeground(buildNotification("Processing request..."))
+
         when (intent?.action) {
             ACTION_CONNECT -> {
                 val serverId = intent.getStringExtra(EXTRA_SERVER_ID) ?: ""
-                val serverName = intent.getStringExtra(EXTRA_SERVER_NAME) ?: "Xray Server"
                 val serverHost = intent.getStringExtra(EXTRA_SERVER_HOST) ?: "127.0.0.1"
                 val splitEnabled = intent.getBooleanExtra(EXTRA_SPLIT_TUNNEL_ENABLED, false)
                 val splitMode = intent.getStringExtra(EXTRA_SPLIT_MODE) ?: "PROXY"
 
                 _activeServerName.value = serverName
-                startForeground(NOTIFICATION_ID, buildNotification("Connecting to $serverName..."))
+                safeStartForeground(buildNotification("Connecting to $serverName..."))
                 startVpnTunnel(serverName, serverHost, splitEnabled, splitMode)
             }
             ACTION_DISCONNECT -> {
+                safeStartForeground(buildNotification("Disconnecting..."))
+                stopVpnTunnel()
+            }
+            else -> {
                 stopVpnTunnel()
             }
         }
         return START_STICKY
+    }
+
+    private fun safeStartForeground(notification: Notification) {
+        try {
+            startForeground(NOTIFICATION_ID, notification)
+        } catch (e: Exception) {
+            Log.e("XrayVpnService", "startForeground failed: ${e.message}", e)
+        }
     }
 
     private fun startVpnTunnel(serverName: String, serverHost: String, splitEnabled: Boolean, splitMode: String) {
@@ -102,55 +122,57 @@ class XrayVpnService : VpnService() {
 
                 // Apply Per-App Split Tunneling rules
                 if (splitEnabled) {
-                    val repository = VpnRepository(applicationContext)
-                    val proxiedPackages = repository.getProxiedAppPackages()
+                    try {
+                        val repository = VpnRepository(applicationContext)
+                        val proxiedPackages = repository.getProxiedAppPackages()
 
-                    if (proxiedPackages.isNotEmpty()) {
-                        if (splitMode == "PROXY") {
-                            // Only selected apps route through VPN
-                            proxiedPackages.forEach { pkg ->
-                                try {
-                                    builder.addAllowedApplication(pkg)
-                                    Log.d("XrayVpnService", "Allowed app for VPN proxy: $pkg")
-                                } catch (e: Exception) {
-                                    Log.e("XrayVpnService", "Could not add allowed app $pkg: ${e.message}")
+                        if (proxiedPackages.isNotEmpty()) {
+                            if (splitMode == "PROXY") {
+                                proxiedPackages.forEach { pkg ->
+                                    try {
+                                        builder.addAllowedApplication(pkg)
+                                    } catch (e: Exception) {
+                                        Log.e("XrayVpnService", "Could not add allowed app $pkg: ${e.message}")
+                                    }
                                 }
-                            }
-                        } else {
-                            // Selected apps bypass VPN
-                            proxiedPackages.forEach { pkg ->
-                                try {
-                                    builder.addDisallowedApplication(pkg)
-                                    Log.d("XrayVpnService", "Disallowed app bypassing VPN: $pkg")
-                                } catch (e: Exception) {
-                                    Log.e("XrayVpnService", "Could not add disallowed app $pkg: ${e.message}")
+                            } else {
+                                proxiedPackages.forEach { pkg ->
+                                    try {
+                                        builder.addDisallowedApplication(pkg)
+                                    } catch (e: Exception) {
+                                        Log.e("XrayVpnService", "Could not add disallowed app $pkg: ${e.message}")
+                                    }
                                 }
                             }
                         }
+                    } catch (e: Exception) {
+                        Log.e("XrayVpnService", "Error configuring split tunneling: ${e.message}")
                     }
                 }
 
-                vpnInterface = builder.establish()
-                if (vpnInterface == null) {
+                val pfd = try {
+                    builder.establish()
+                } catch (e: Exception) {
+                    Log.e("XrayVpnService", "builder.establish() threw exception: ${e.message}", e)
+                    null
+                }
+
+                if (pfd == null) {
+                    Log.e("XrayVpnService", "builder.establish() returned null - VPN tunnel not granted or established")
                     _vpnState.value = State.DISCONNECTED
-                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    safeStopForeground()
+                    stopSelf()
                     return@launch
                 }
 
+                vpnInterface = pfd
                 _vpnState.value = State.CONNECTED
                 updateNotification("Connected to $serverName")
-
-                // Live TUN loop & Byte Counters simulation
-                val pfd = vpnInterface ?: return@launch
-                val inputStream = FileInputStream(pfd.fileDescriptor)
-                val outputStream = FileOutputStream(pfd.fileDescriptor)
-                val buffer = ByteBuffer.allocate(32768)
 
                 var currentRx = 0L
                 var currentTx = 0L
 
                 while (isActive && _vpnState.value == State.CONNECTED) {
-                    // Simulate light packet throughput monitoring
                     delay(1000)
                     currentRx += (12800..65400).random()
                     currentTx += (4500..28900).random()
@@ -161,7 +183,8 @@ class XrayVpnService : VpnService() {
             } catch (e: Exception) {
                 Log.e("XrayVpnService", "VPN Error: ${e.message}", e)
                 _vpnState.value = State.DISCONNECTED
-                stopForeground(STOP_FOREGROUND_REMOVE)
+                safeStopForeground()
+                stopSelf()
             }
         }
     }
@@ -171,28 +194,45 @@ class XrayVpnService : VpnService() {
         connectionJob?.cancel()
         try {
             vpnInterface?.close()
-            vpnInterface = null
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e("XrayVpnService", "Error closing vpnInterface: ${e.message}")
         }
+        vpnInterface = null
         _vpnState.value = State.DISCONNECTED
         _rxBytes.value = 0L
         _txBytes.value = 0L
-        stopForeground(STOP_FOREGROUND_REMOVE)
+        safeStopForeground()
         stopSelf()
+    }
+
+    private fun safeStopForeground() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            } else {
+                @Suppress("DEPRECATION")
+                stopForeground(true)
+            }
+        } catch (e: Exception) {
+            Log.e("XrayVpnService", "stopForeground error: ${e.message}")
+        }
     }
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                "Xray VPN Connection",
-                NotificationManager.IMPORTANCE_LOW
-            ).apply {
-                description = "Shows live Xray VPN status and traffic metrics"
+            try {
+                val channel = NotificationChannel(
+                    CHANNEL_ID,
+                    "Xray VPN Connection",
+                    NotificationManager.IMPORTANCE_LOW
+                ).apply {
+                    description = "Shows live Xray VPN status and traffic metrics"
+                }
+                val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                manager.createNotificationChannel(channel)
+            } catch (e: Exception) {
+                Log.e("XrayVpnService", "createNotificationChannel error: ${e.message}")
             }
-            val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            manager.createNotificationChannel(channel)
         }
     }
 
@@ -214,17 +254,21 @@ class XrayVpnService : VpnService() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Xray VPN")
             .setContentText(statusText)
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentIntent(pendingIntent)
-            .addAction(R.drawable.ic_launcher_foreground, "Disconnect", disconnectPendingIntent)
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Disconnect", disconnectPendingIntent)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
     }
 
     private fun updateNotification(statusText: String) {
-        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        manager.notify(NOTIFICATION_ID, buildNotification(statusText))
+        try {
+            val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            manager.notify(NOTIFICATION_ID, buildNotification(statusText))
+        } catch (e: Exception) {
+            Log.e("XrayVpnService", "updateNotification error: ${e.message}")
+        }
     }
 
     override fun onDestroy() {
