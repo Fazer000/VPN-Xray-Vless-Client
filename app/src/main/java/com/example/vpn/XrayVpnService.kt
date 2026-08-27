@@ -479,7 +479,9 @@ class XrayVpnService : VpnService() {
         serverPath: String,
         serverSni: String
     ) {
-        val key = "$srcPort:$dstPort"
+        val srcIpStr = try { InetAddress.getByAddress(srcIp).hostAddress ?: "" } catch (_: Exception) { "" }
+        val dstIpStr = try { InetAddress.getByAddress(dstIp).hostAddress ?: "" } catch (_: Exception) { "" }
+        val key = "$srcIpStr:$srcPort->$dstIpStr:$dstPort"
         val existingSession = tcpSessions[key]
 
         val isSyn = (flags and 0x02) != 0
@@ -487,6 +489,14 @@ class XrayVpnService : VpnService() {
         val isFin = (flags and 0x01) != 0
 
         if (isSyn) {
+            if (existingSession != null && !existingSession.isClosed) {
+                if (existingSession.isConnected) {
+                    // Retransmitted SYN: re-send SYN-ACK
+                    sendTcpPacket(output, dstIp, srcIp, dstPort, srcPort, (existingSession.serverSeq - 1) and 0xFFFFFFFFL, existingSession.clientSeq, 0x12, null)
+                }
+                return
+            }
+
             val session = TcpSession(
                 key = key,
                 srcPort = srcPort,
@@ -500,11 +510,7 @@ class XrayVpnService : VpnService() {
 
             serviceScope.launch(Dispatchers.IO) {
                 try {
-                    val targetHost = try {
-                        InetAddress.getByAddress(dstIp).hostAddress ?: "127.0.0.1"
-                    } catch (_: Exception) {
-                        "127.0.0.1"
-                    }
+                    val targetHost = if (dstIpStr.isNotEmpty()) dstIpStr else "127.0.0.1"
 
                     val socket = connectProxySocket(
                         serverHost, serverPort, serverProtocol, serverUuid,
@@ -521,7 +527,7 @@ class XrayVpnService : VpnService() {
 
                     launchSocketReader(session, output)
                 } catch (e: Exception) {
-                    Log.d("XrayVpnService", "TCP connect error to port $dstPort: ${e.message}")
+                    Log.d("XrayVpnService", "TCP connect error to $dstIpStr:$dstPort: ${e.message}")
                     sendTcpPacket(output, dstIp, srcIp, dstPort, srcPort, 0L, (seqVal + 1) and 0xFFFFFFFFL, 0x04, null)
                     tcpSessions.remove(key)
                 }
@@ -1051,15 +1057,22 @@ class XrayVpnService : VpnService() {
         serviceScope.launch(Dispatchers.IO) {
             val socket = session.socket ?: return@launch
             val buffer = ByteArray(16384)
+            val maxMss = 1360 // Safe MSS (1360 payload + 40 headers = 1400 <= 1500 TUN MTU)
             try {
                 val input = socket.getInputStream()
                 while (isActive && session.isConnected && !session.isClosed && !socket.isClosed) {
                     val read = input.read(buffer)
                     if (read <= 0) break
-                    val chunk = buffer.copyOf(read)
                     addRxBytes(read.toLong())
-                    sendTcpPacket(output, session.serverIp, session.clientIp, session.dstPort, session.srcPort, session.serverSeq, session.clientSeq, 0x18, chunk)
-                    session.serverSeq = (session.serverSeq + read) and 0xFFFFFFFFL
+
+                    var offset = 0
+                    while (offset < read) {
+                        val chunkSize = Math.min(read - offset, maxMss)
+                        val chunk = buffer.copyOfRange(offset, offset + chunkSize)
+                        sendTcpPacket(output, session.serverIp, session.clientIp, session.dstPort, session.srcPort, session.serverSeq, session.clientSeq, 0x18, chunk)
+                        session.serverSeq = (session.serverSeq + chunkSize) and 0xFFFFFFFFL
+                        offset += chunkSize
+                    }
                 }
             } catch (_: Exception) {
             } finally {
@@ -1323,7 +1336,7 @@ class VlessInputStream(private val delegateIn: InputStream) : InputStream() {
 }
 
 class WebSocketStreamSocket(private val delegate: Socket) : Socket() {
-    private val inStream = WebSocketInputStream(delegate.getInputStream())
+    private val inStream = WebSocketInputStream(delegate.getInputStream(), delegate.getOutputStream())
     private val outStream = WebSocketOutputStream(delegate.getOutputStream())
 
     override fun getInputStream(): InputStream = inStream
@@ -1381,9 +1394,13 @@ class WebSocketOutputStream(private val delegateOut: OutputStream) : OutputStrea
     }
 }
 
-class WebSocketInputStream(private val delegateIn: InputStream) : InputStream() {
+class WebSocketInputStream(
+    private val delegateIn: InputStream,
+    private val delegateOut: OutputStream? = null
+) : InputStream() {
     private var bufferBytes = ByteArray(0)
     private var bufferPos = 0
+    private val random = java.security.SecureRandom()
 
     override fun read(): Int {
         val b = ByteArray(1)
@@ -1401,6 +1418,33 @@ class WebSocketInputStream(private val delegateIn: InputStream) : InputStream() 
         System.arraycopy(bufferBytes, bufferPos, b, off, toCopy)
         bufferPos += toCopy
         return toCopy
+    }
+
+    private fun sendPongFrame(payload: ByteArray) {
+        if (delegateOut == null) return
+        try {
+            val bos = ByteArrayOutputStream()
+            bos.write(0x8A) // FIN + Opcode 10 (Pong)
+            val maskKey = ByteArray(4)
+            random.nextBytes(maskKey)
+            val len = payload.size
+            if (len <= 125) {
+                bos.write(0x80 or len)
+            } else {
+                bos.write(0x80 or 126)
+                bos.write((len ushr 8) and 0xFF)
+                bos.write(len and 0xFF)
+            }
+            bos.write(maskKey)
+            for (i in 0 until len) {
+                val masked = (payload[i].toInt() xor maskKey[i % 4].toInt()).toByte()
+                bos.write(masked.toInt())
+            }
+            synchronized(delegateOut) {
+                delegateOut.write(bos.toByteArray())
+                delegateOut.flush()
+            }
+        } catch (_: Exception) {}
     }
 
     private fun readNextFrame(): Boolean {
@@ -1457,6 +1501,7 @@ class WebSocketInputStream(private val delegateIn: InputStream) : InputStream() 
             if (opcode == 0x8) { // Close
                 return false
             } else if (opcode == 0x9) { // Ping
+                sendPongFrame(payload)
                 continue
             } else if (opcode == 0x1 || opcode == 0x2 || opcode == 0x0) { // Text/Binary/Continuation
                 bufferBytes = payload
