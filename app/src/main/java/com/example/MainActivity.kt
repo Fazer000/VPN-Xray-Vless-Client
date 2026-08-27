@@ -21,6 +21,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.example.ui.screens.HomeScreen
+import com.example.ui.screens.LogsScreen
 import com.example.ui.screens.ServersScreen
 import com.example.ui.screens.SplitTunnelingScreen
 import com.example.ui.screens.SubscriptionsScreen
@@ -48,6 +49,7 @@ sealed class NavItem(val route: String, val title: String, val icon: ImageVector
     object Servers : NavItem("servers", "Servers", Icons.Default.Dns)
     object Split : NavItem("split", "Split Tunnel", Icons.Default.AltRoute)
     object Subscriptions : NavItem("subscriptions", "Subscriptions", Icons.Default.RssFeed)
+    object Logs : NavItem("logs", "Logs", Icons.Default.Terminal)
 }
 
 @Composable
@@ -60,7 +62,8 @@ fun MainAppScreen(viewModel: VpnViewModel) {
         NavItem.Home,
         NavItem.Servers,
         NavItem.Split,
-        NavItem.Subscriptions
+        NavItem.Subscriptions,
+        NavItem.Logs
     )
 
     Scaffold(
@@ -144,6 +147,10 @@ fun MainAppScreen(viewModel: VpnViewModel) {
 
             composable(NavItem.Subscriptions.route) {
                 SubscriptionsScreen(viewModel = viewModel)
+            }
+
+            composable(NavItem.Logs.route) {
+                LogsScreen()
             }
         }
     }

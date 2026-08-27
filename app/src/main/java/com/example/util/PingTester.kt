@@ -17,7 +17,7 @@ object PingTester {
     suspend fun testPing(server: VpnServer, timeoutMs: Int = 3000): Long = withContext(Dispatchers.IO) {
         val startTime = System.currentTimeMillis()
         try {
-            kotlinx.coroutines.withTimeoutOrNull(timeoutMs.toLong()) {
+            val res = kotlinx.coroutines.withTimeoutOrNull(timeoutMs.toLong()) {
                 val address = java.net.InetAddress.getByName(server.host)
                 val socketAddress = java.net.InetSocketAddress(address, server.port)
                 java.net.Socket().use { socket ->
@@ -27,7 +27,14 @@ object PingTester {
                 val delta = endTime - startTime
                 if (delta <= 0) 1L else delta
             } ?: -2L
+            if (res > 0) {
+                LogManager.d("PingTest", "Ping to '${server.name}' (${server.host}:${server.port}): ${res}ms")
+            } else {
+                LogManager.w("PingTest", "Ping to '${server.name}' (${server.host}:${server.port}) TIMEOUT/FAILED")
+            }
+            res
         } catch (e: Exception) {
+            LogManager.e("PingTest", "Ping to '${server.name}' (${server.host}:${server.port}) error: ${e.message}")
             -2L
         }
     }

@@ -14,6 +14,7 @@ import androidx.core.app.NotificationCompat
 import com.example.MainActivity
 import com.example.R
 import com.example.data.repository.VpnRepository
+import com.example.util.LogManager
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -172,8 +173,12 @@ class XrayVpnService : VpnService() {
         _rxBytes.value = 0L
         _txBytes.value = 0L
 
+        LogManager.i("Service", "Starting VPN session: '$serverName'")
+        LogManager.i("Service", "Target Server: $serverProtocol://$serverHost:$serverPort (Security: $serverSecurity, Net: $serverNetwork, SNI: $serverSni)")
+
         connectionJob = serviceScope.launch {
             try {
+                LogManager.i("TUN", "Building TUN interface (IP: 10.0.0.2/24, MTU: 1500, DNS: 1.1.1.1, 8.8.8.8)")
                 val builder = Builder()
                     .setSession(serverName)
                     .addAddress("10.0.0.2", 24)
@@ -187,6 +192,7 @@ class XrayVpnService : VpnService() {
                     try {
                         val repository = VpnRepository(applicationContext)
                         val proxiedPackages = repository.getProxiedAppPackages().filter { it != packageName }
+                        LogManager.i("SplitTunnel", "Mode: $splitMode, App Count: ${proxiedPackages.size}")
 
                         if (proxiedPackages.isNotEmpty()) {
                             if (splitMode == "PROXY") {
@@ -194,7 +200,7 @@ class XrayVpnService : VpnService() {
                                     try {
                                         builder.addAllowedApplication(pkg)
                                     } catch (e: Exception) {
-                                        Log.e("XrayVpnService", "Could not add allowed app $pkg: ${e.message}")
+                                        LogManager.w("SplitTunnel", "Could not add allowed app $pkg: ${e.message}")
                                     }
                                 }
                             } else {
@@ -205,7 +211,7 @@ class XrayVpnService : VpnService() {
                                     try {
                                         builder.addDisallowedApplication(pkg)
                                     } catch (e: Exception) {
-                                        Log.e("XrayVpnService", "Could not add disallowed app $pkg: ${e.message}")
+                                        LogManager.w("SplitTunnel", "Could not add disallowed app $pkg: ${e.message}")
                                     }
                                 }
                             }
@@ -215,7 +221,7 @@ class XrayVpnService : VpnService() {
                             } catch (_: Exception) {}
                         }
                     } catch (e: Exception) {
-                        Log.e("XrayVpnService", "Error configuring split tunneling: ${e.message}")
+                        LogManager.e("SplitTunnel", "Error configuring split tunneling: ${e.message}")
                     }
                 } else {
                     try {
@@ -226,12 +232,12 @@ class XrayVpnService : VpnService() {
                 val pfd = try {
                     builder.establish()
                 } catch (e: Exception) {
-                    Log.e("XrayVpnService", "builder.establish() threw exception: ${e.message}", e)
+                    LogManager.e("TUN", "builder.establish() threw exception: ${e.message}")
                     null
                 }
 
                 if (pfd == null) {
-                    Log.e("XrayVpnService", "builder.establish() returned null - VPN tunnel not granted or established")
+                    LogManager.e("TUN", "builder.establish() returned null - VPN permission not granted or rejected")
                     _vpnState.value = State.DISCONNECTED
                     safeStopForeground()
                     stopSelf()
@@ -240,6 +246,7 @@ class XrayVpnService : VpnService() {
 
                 vpnInterface = pfd
                 _vpnState.value = State.CONNECTED
+                LogManager.i("Service", "VPN Tunnel established! Listening for IP traffic...")
                 updateNotification("Connected to $serverName")
 
                 // Start TUN packet handling loop for DNS queries, ICMP pings, and traffic relay
@@ -579,6 +586,7 @@ class XrayVpnService : VpnService() {
         targetHost: String,
         targetPort: Int
     ): Socket {
+        LogManager.d("Outbound", "Routing stream -> $serverProtocol://$serverHost:$serverPort -> $targetHost:$targetPort")
         return try {
             when (serverProtocol.uppercase()) {
                 "VLESS" -> establishVlessConnection(serverHost, serverPort, serverUuid, serverSecurity, serverNetwork, serverPath, serverSni, targetHost, targetPort)
@@ -600,7 +608,7 @@ class XrayVpnService : VpnService() {
                 }
             }
         } catch (e: Exception) {
-            Log.e("XrayVpnService", "Proxy connect failed for $serverProtocol ($serverHost:$serverPort) to $targetHost:$targetPort - ${e.message}")
+            LogManager.e("Outbound", "Proxy connect failed for $serverProtocol ($serverHost:$serverPort) -> $targetHost:$targetPort: ${e.message}")
             establishDirectConnection(targetHost, targetPort)
         }
     }
@@ -930,10 +938,11 @@ class XrayVpnService : VpnService() {
                     if (respDnsPayload != null && respDnsPayload.isNotEmpty()) {
                         sendUdpPacketToTun(output, dnsServerIp, dnsPort, clientIp, clientPort, respDnsPayload)
                         dohSuccess = true
+                        LogManager.d("DNS", "Resolved DNS via Cloudflare DoH (size: ${respDnsPayload.size} bytes)")
                     }
                 }
             } catch (e: Exception) {
-                Log.d("XrayVpnService", "Cloudflare DoH error: ${e.message}")
+                LogManager.d("DNS", "Cloudflare DoH error: ${e.message}")
             }
 
             // Try Google DoH if Cloudflare fails
@@ -953,10 +962,11 @@ class XrayVpnService : VpnService() {
                         if (respDnsPayload != null && respDnsPayload.isNotEmpty()) {
                             sendUdpPacketToTun(output, dnsServerIp, dnsPort, clientIp, clientPort, respDnsPayload)
                             dohSuccess = true
+                            LogManager.d("DNS", "Resolved DNS via Google DoH (size: ${respDnsPayload.size} bytes)")
                         }
                     }
                 } catch (e: Exception) {
-                    Log.d("XrayVpnService", "Google DoH error: ${e.message}")
+                    LogManager.d("DNS", "Google DoH error: ${e.message}")
                 }
             }
 
@@ -976,9 +986,10 @@ class XrayVpnService : VpnService() {
 
                         val respDnsPayload = inPacket.data.copyOf(inPacket.length)
                         sendUdpPacketToTun(output, dnsServerIp, dnsPort, clientIp, clientPort, respDnsPayload)
+                        LogManager.d("DNS", "Resolved DNS via UDP fallback")
                     }
                 } catch (e: Exception) {
-                    Log.d("XrayVpnService", "UDP DNS fallback error: ${e.message}")
+                    LogManager.w("DNS", "UDP DNS fallback failed: ${e.message}")
                 }
             }
         }
