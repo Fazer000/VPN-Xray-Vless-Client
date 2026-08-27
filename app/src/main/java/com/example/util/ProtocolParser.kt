@@ -424,7 +424,7 @@ object ProtocolParser {
             val jsonStr = content.trim()
             if (jsonStr.startsWith("{")) {
                 val jsonObj = JSONObject(jsonStr)
-                val globalRemark = jsonObj.optString("remarks", "")
+                val globalRemark = jsonObj.optString("remarks", jsonObj.optString("name", ""))
 
                 val outbounds = jsonObj.optJSONArray("outbounds")
                 if (outbounds != null) {
@@ -442,10 +442,22 @@ object ProtocolParser {
             } else if (jsonStr.startsWith("[")) {
                 val jsonArr = org.json.JSONArray(jsonStr)
                 for (i in 0 until jsonArr.length()) {
-                    val ob = jsonArr.optJSONObject(i) ?: continue
-                    val server = parseOutboundJson(ob, defaultGroup, subscriptionId)
-                    if (server != null) {
-                        servers.add(server)
+                    val item = jsonArr.optJSONObject(i) ?: continue
+                    val globalRemark = item.optString("remarks", item.optString("name", ""))
+                    val outbounds = item.optJSONArray("outbounds")
+                    if (outbounds != null) {
+                        for (j in 0 until outbounds.length()) {
+                            val ob = outbounds.optJSONObject(j) ?: continue
+                            val server = parseOutboundJson(ob, defaultGroup, subscriptionId, globalRemark)
+                            if (server != null) {
+                                servers.add(server)
+                            }
+                        }
+                    } else {
+                        val server = parseOutboundJson(item, defaultGroup, subscriptionId, globalRemark)
+                        if (server != null) {
+                            servers.add(server)
+                        }
                     }
                 }
             }
@@ -470,32 +482,36 @@ object ProtocolParser {
             "trojan" -> VpnProtocol.TROJAN
             "shadowsocks", "ss" -> VpnProtocol.SHADOWSOCKS
             "socks", "socks5" -> VpnProtocol.SOCKS
-            "hysteria2", "hy2" -> VpnProtocol.HYSTERIA2
+            "hysteria2", "hy2", "hysteria" -> VpnProtocol.HYSTERIA2
             else -> return null
         }
 
         var host = ob.optString("server", ob.optString("address", ""))
         var port = ob.optInt("server_port", ob.optInt("port", 443))
-        var uuid = ob.optString("uuid", ob.optString("password", ""))
+        var uuid = ob.optString("uuid", ob.optString("password", ob.optString("auth", "")))
 
         val settings = ob.optJSONObject("settings")
         if (settings != null) {
+            if (host.isEmpty()) host = settings.optString("address", settings.optString("server", ""))
+            if (port == 443 || port == 0) port = settings.optInt("port", settings.optInt("server_port", 443))
+            if (uuid.isEmpty()) uuid = settings.optString("auth", settings.optString("password", ""))
+
             val vnext = settings.optJSONArray("vnext")
             if (vnext != null && vnext.length() > 0) {
                 val target = vnext.getJSONObject(0)
                 if (host.isEmpty()) host = target.optString("address", "")
-                if (port == 443) port = target.optInt("port", 443)
+                if (port == 443 || port == 0) port = target.optInt("port", 443)
                 val users = target.optJSONArray("users")
                 if (users != null && users.length() > 0) {
                     val u = users.getJSONObject(0)
-                    if (uuid.isEmpty()) uuid = u.optString("id", u.optString("uuid", ""))
+                    if (uuid.isEmpty()) uuid = u.optString("id", u.optString("uuid", u.optString("password", "")))
                 }
             }
             val servers = settings.optJSONArray("servers")
             if (servers != null && servers.length() > 0) {
                 val target = servers.getJSONObject(0)
                 if (host.isEmpty()) host = target.optString("address", "")
-                if (port == 443) port = target.optInt("port", 443)
+                if (port == 443 || port == 0) port = target.optInt("port", 443)
                 if (uuid.isEmpty()) uuid = target.optString("password", target.optString("id", ""))
             }
         }
@@ -515,9 +531,13 @@ object ProtocolParser {
             val wsSettings = streamSettings.optJSONObject("wsSettings")
             if (wsSettings != null) {
                 path = wsSettings.optString("path", "")
+                val wsHost = wsSettings.optString("host", "")
+                if (wsHost.isNotEmpty()) sni = wsHost
+
                 val headers = wsSettings.optJSONObject("headers")
-                if (headers != null && headers.has("host")) {
-                    sni = headers.optString("host", sni)
+                if (headers != null) {
+                    val hHost = headers.optString("host", headers.optString("Host", ""))
+                    if (hHost.isNotEmpty()) sni = hHost
                 }
             }
 
@@ -528,13 +548,20 @@ object ProtocolParser {
 
             val tlsSettings = streamSettings.optJSONObject("tlsSettings")
             if (tlsSettings != null) {
-                sni = tlsSettings.optString("serverName", sni)
+                val sName = tlsSettings.optString("serverName", tlsSettings.optString("sni", ""))
+                if (sName.isNotEmpty()) sni = sName
             }
 
             val realitySettings = streamSettings.optJSONObject("realitySettings")
             if (realitySettings != null) {
                 security = "reality"
-                sni = realitySettings.optString("serverName", sni)
+                val sName = realitySettings.optString("serverName", realitySettings.optString("sni", ""))
+                if (sName.isNotEmpty()) sni = sName
+            }
+
+            val hysteriaSettings = streamSettings.optJSONObject("hysteriaSettings") ?: streamSettings.optJSONObject("hy2Settings")
+            if (hysteriaSettings != null) {
+                if (uuid.isEmpty()) uuid = hysteriaSettings.optString("auth", hysteriaSettings.optString("password", ""))
             }
         }
 
@@ -551,7 +578,16 @@ object ProtocolParser {
 
         val tag = ob.optString("tag", ob.optString("remarks", ""))
         val name = when {
-            globalRemark.isNotEmpty() && tag.isNotEmpty() -> "$globalRemark ($tag)"
+            globalRemark.isNotEmpty() && tag.isNotEmpty() -> {
+                if (tag.equals("proxy", ignoreCase = true)) {
+                    globalRemark
+                } else if (tag.startsWith("proxy-", ignoreCase = true)) {
+                    val num = tag.substringAfter("proxy-")
+                    "$globalRemark #$num"
+                } else {
+                    "$globalRemark ($tag)"
+                }
+            }
             tag.isNotEmpty() -> tag
             globalRemark.isNotEmpty() -> globalRemark
             else -> "${protocol.name} $host"
