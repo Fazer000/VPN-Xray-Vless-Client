@@ -665,28 +665,7 @@ class XrayVpnService : VpnService() {
         out.write(bos.toByteArray())
         out.flush()
 
-        val input = socket.getInputStream()
-        val respHeader = ByteArray(2)
-        var read = 0
-        while (read < 2) {
-            val count = input.read(respHeader, read, 2 - read)
-            if (count < 0) break
-            read += count
-        }
-        if (read >= 2) {
-            val addLen = respHeader[1].toInt() and 0xFF
-            if (addLen > 0) {
-                val addBytes = ByteArray(addLen)
-                var addRead = 0
-                while (addRead < addLen) {
-                    val c = input.read(addBytes, addRead, addLen - addRead)
-                    if (c < 0) break
-                    addRead += c
-                }
-            }
-        }
-
-        return socket
+        return VlessStreamSocket(socket)
     }
 
     private fun establishTrojanConnection(
@@ -1287,6 +1266,59 @@ class XrayVpnService : VpnService() {
         stopVpnTunnel()
         serviceScope.cancel()
         super.onDestroy()
+    }
+}
+
+class VlessStreamSocket(private val delegate: Socket) : Socket() {
+    private val inStream = VlessInputStream(delegate.getInputStream())
+
+    override fun getInputStream(): InputStream = inStream
+    override fun getOutputStream(): OutputStream = delegate.getOutputStream()
+    override fun isConnected(): Boolean = delegate.isConnected
+    override fun isClosed(): Boolean = delegate.isClosed
+    override fun close() {
+        try { delegate.close() } catch (_: Exception) {}
+    }
+}
+
+class VlessInputStream(private val delegateIn: InputStream) : InputStream() {
+    private var headerRead = false
+
+    override fun read(): Int {
+        val b = ByteArray(1)
+        val r = read(b, 0, 1)
+        return if (r > 0) b[0].toInt() and 0xFF else -1
+    }
+
+    override fun read(b: ByteArray, off: Int, len: Int): Int {
+        if (len <= 0) return 0
+        if (!headerRead) {
+            headerRead = true
+            try {
+                val respHeader = ByteArray(2)
+                var read = 0
+                while (read < 2) {
+                    val count = delegateIn.read(respHeader, read, 2 - read)
+                    if (count < 0) break
+                    read += count
+                }
+                if (read >= 2) {
+                    val addLen = respHeader[1].toInt() and 0xFF
+                    if (addLen > 0) {
+                        val addBytes = ByteArray(addLen)
+                        var addRead = 0
+                        while (addRead < addLen) {
+                            val c = delegateIn.read(addBytes, addRead, addLen - addRead)
+                            if (c < 0) break
+                            addRead += c
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                LogManager.w("VLESS", "VLESS header read error: ${e.message}")
+            }
+        }
+        return delegateIn.read(b, off, len)
     }
 }
 
