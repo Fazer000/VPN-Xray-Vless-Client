@@ -5,11 +5,16 @@ on:
     branches:
       - main
       - master
+    tags:
+      - 'v*'
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
-    name: Build Release APK
+    name: Build & Release APK
     runs-on: ubuntu-latest
 
     steps:
@@ -29,8 +34,31 @@ jobs:
       - name: Build Release APK
         run: ./gradlew assembleRelease --no-daemon
 
-      - name: Upload Release APK
+      - name: Prepare Release Assets
+        run: |
+          mkdir -p release-assets
+          cp app/build/outputs/apk/release/*.apk release-assets/VPN-Xray-Client.apk || true
+
+      - name: Upload Build Artifact
         uses: actions/upload-artifact@v4
         with:
           name: xray-vpn-release-apk
-          path: app/build/outputs/apk/release/*.apk
+          path: release-assets/*.apk
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v1.0.{0}', github.run_number) }}
+          name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('Release v1.0.{0}', github.run_number) }}
+          body: |
+            ## Xray VPN Client Release
+            Build: #${{ github.run_number }}
+            Commit: ${{ github.sha }}
+            
+            ### Downloads
+            - **VPN-Xray-Client.apk** - Ready to install Android APK
+          files: release-assets/*.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+

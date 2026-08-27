@@ -294,12 +294,12 @@ fun AddSubscriptionDialog(
         },
         text = {
             Column {
-                Text("Введите URL подписки:", fontSize = 13.sp, color = TextSecondary)
+                Text("URL подписки, V2Ray ссылка или JSON-конфиг:", fontSize = 13.sp, color = TextSecondary)
                 Spacer(modifier = Modifier.height(6.dp))
                 OutlinedTextField(
                     value = urlText,
                     onValueChange = { urlText = it },
-                    placeholder = { Text("https://...", fontSize = 12.sp, color = TextSecondary) },
+                    placeholder = { Text("https://... или vless:// или JSON", fontSize = 12.sp, color = TextSecondary) },
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("add_sub_url_input"),

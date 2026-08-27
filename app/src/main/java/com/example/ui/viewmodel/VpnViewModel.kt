@@ -9,14 +9,29 @@ import com.example.data.model.AppRule
 import com.example.data.model.Subscription
 import com.example.data.model.VpnServer
 import com.example.data.repository.VpnRepository
+import com.example.util.AppUpdateInfo
+import com.example.util.DownloadState
+import com.example.util.UpdateManager
 import com.example.vpn.XrayVpnService
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import java.io.File
 
 class VpnViewModel(application: Application) : AndroidViewModel(application) {
 
     private val repository = VpnRepository(application)
+    private val updateManager = UpdateManager(application)
     private val prefs = application.getSharedPreferences("xray_vpn_prefs", Context.MODE_PRIVATE)
+
+    // Update States
+    private val _updateInfo = MutableStateFlow<AppUpdateInfo?>(null)
+    val updateInfo: StateFlow<AppUpdateInfo?> = _updateInfo.asStateFlow()
+
+    private val _isCheckingUpdate = MutableStateFlow(false)
+    val isCheckingUpdate: StateFlow<Boolean> = _isCheckingUpdate.asStateFlow()
+
+    private val _downloadState = MutableStateFlow<DownloadState>(DownloadState.Idle)
+    val downloadState: StateFlow<DownloadState> = _downloadState.asStateFlow()
 
     // Room Flows
     val servers: StateFlow<List<VpnServer>> = repository.allServers
@@ -194,6 +209,35 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             repository.setAllAppRulesProxied(isProxied)
         }
+    }
+
+    fun checkForAppUpdates() {
+        viewModelScope.launch {
+            _isCheckingUpdate.value = true
+            val info = updateManager.checkForUpdates()
+            _updateInfo.value = info
+            _isCheckingUpdate.value = false
+        }
+    }
+
+    fun startDownloadAndUpdate(url: String) {
+        viewModelScope.launch {
+            updateManager.downloadApk(url).collect { state ->
+                _downloadState.value = state
+                if (state is DownloadState.Finished) {
+                    installDownloadedApk(state.apkFile)
+                }
+            }
+        }
+    }
+
+    fun installDownloadedApk(file: File) {
+        updateManager.installApk(file)
+    }
+
+    fun dismissUpdateDialog() {
+        _updateInfo.value = null
+        _downloadState.value = DownloadState.Idle
     }
 
     fun toggleVpnConnection(context: Context) {

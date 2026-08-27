@@ -27,6 +27,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.model.VpnServer
+import com.example.ui.components.UpdateDialog
 import com.example.ui.theme.*
 import com.example.ui.viewmodel.VpnViewModel
 import com.example.vpn.XrayVpnService
@@ -44,6 +45,10 @@ fun HomeScreen(
     val txBytes by viewModel.txBytes.collectAsState()
     val splitTunnelEnabled by viewModel.splitTunnelEnabled.collectAsState()
 
+    val updateInfo by viewModel.updateInfo.collectAsState()
+    val isCheckingUpdate by viewModel.isCheckingUpdate.collectAsState()
+    val downloadState by viewModel.downloadState.collectAsState()
+
     val vpnPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
     ) { result ->
@@ -51,6 +56,15 @@ fun HomeScreen(
             viewModel.toggleVpnConnection(context)
         }
     }
+
+    UpdateDialog(
+        updateInfo = updateInfo,
+        isChecking = isCheckingUpdate,
+        downloadState = downloadState,
+        onCheckUpdate = { viewModel.checkForAppUpdates() },
+        onDownloadAndUpdate = { url -> viewModel.startDownloadAndUpdate(url) },
+        onDismiss = { viewModel.dismissUpdateDialog() }
+    )
 
     val isConnected = vpnState == XrayVpnService.State.CONNECTED
     val isConnecting = vpnState == XrayVpnService.State.CONNECTING
@@ -96,31 +110,55 @@ fun HomeScreen(
                 )
             }
 
-            // Split Tunnel Indicator Pill
-            Surface(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(20.dp))
-                    .clickable { onNavigateToSplitTunnel() }
-                    .testTag("home_split_tunnel_btn"),
-                color = if (splitTunnelEnabled) CyberCyan.copy(alpha = 0.15f) else CyberSurface
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                // Check Update Icon Button
+                IconButton(
+                    onClick = { viewModel.checkForAppUpdates() },
+                    modifier = Modifier.testTag("home_update_btn")
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.AltRoute,
-                        contentDescription = "Split Tunneling",
-                        tint = if (splitTunnelEnabled) CyberCyan else TextSecondary,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = if (splitTunnelEnabled) "Split: ON" else "Split: OFF",
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium,
-                        color = if (splitTunnelEnabled) CyberCyan else TextSecondary
-                    )
+                    if (isCheckingUpdate) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(20.dp),
+                            color = CyberCyan,
+                            strokeWidth = 2.dp
+                        )
+                    } else {
+                        Icon(
+                            imageVector = Icons.Default.SystemUpdate,
+                            contentDescription = "Check for Updates",
+                            tint = CyberCyan
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.width(4.dp))
+
+                // Split Tunnel Indicator Pill
+                Surface(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(20.dp))
+                        .clickable { onNavigateToSplitTunnel() }
+                        .testTag("home_split_tunnel_btn"),
+                    color = if (splitTunnelEnabled) CyberCyan.copy(alpha = 0.15f) else CyberSurface
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.AltRoute,
+                            contentDescription = "Split Tunneling",
+                            tint = if (splitTunnelEnabled) CyberCyan else TextSecondary,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = if (splitTunnelEnabled) "Split: ON" else "Split: OFF",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = if (splitTunnelEnabled) CyberCyan else TextSecondary
+                        )
+                    }
                 }
             }
         }
@@ -407,7 +445,7 @@ fun LatencyBadge(latencyMs: Long) {
     }
 }
 
-private fun formatBytes(bytes: Long): String {
+fun formatBytes(bytes: Long): String {
     val kb = bytes / 1024.0
     val mb = kb / 1024.0
     return when {
