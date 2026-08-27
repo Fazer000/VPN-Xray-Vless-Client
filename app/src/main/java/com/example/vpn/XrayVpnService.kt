@@ -18,10 +18,23 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import java.io.ByteArrayOutputStream
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.net.Socket
 import java.nio.ByteBuffer
+import java.security.MessageDigest
+import java.util.UUID
+import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLSocket
+import javax.net.ssl.TrustManager
+import javax.net.ssl.X509TrustManager
 
 class XrayVpnService : VpnService() {
 
@@ -72,6 +85,12 @@ class XrayVpnService : VpnService() {
     }
     private var serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob() + coroutineExceptionHandler)
     private var connectionJob: Job? = null
+
+    private val okHttpClient = OkHttpClient.Builder()
+        .connectTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
+        .readTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
+        .followRedirects(true)
+        .build()
 
     private val totalRxBytes = java.util.concurrent.atomic.AtomicLong(0L)
     private val totalTxBytes = java.util.concurrent.atomic.AtomicLong(0L)
@@ -331,7 +350,7 @@ class XrayVpnService : VpnService() {
         val serverIp: ByteArray,
         var clientSeq: Long,
         var serverSeq: Long,
-        var socket: java.net.Socket? = null,
+        var socket: Socket? = null,
         var isConnected: Boolean = false,
         var isClosed: Boolean = false
     )
@@ -396,7 +415,8 @@ class XrayVpnService : VpnService() {
 
                                 handleTcpPacket(
                                     buffer, headerLength, tcpHeaderLength, srcIp, dstIp,
-                                    srcPort, dstPort, seqVal, ackVal, flags, payloadLen, output
+                                    srcPort, dstPort, seqVal, ackVal, flags, payloadLen, output,
+                                    serverHost, serverPort, serverProtocol, serverUuid, serverSecurity, serverNetwork, serverPath, serverSni
                                 )
                             }
                         }
@@ -440,7 +460,15 @@ class XrayVpnService : VpnService() {
         ackVal: Long,
         flags: Int,
         payloadLen: Int,
-        output: FileOutputStream
+        output: FileOutputStream,
+        serverHost: String,
+        serverPort: Int,
+        serverProtocol: String,
+        serverUuid: String,
+        serverSecurity: String,
+        serverNetwork: String,
+        serverPath: String,
+        serverSni: String
     ) {
         val key = "$srcPort:$dstPort"
         val existingSession = tcpSessions[key]
@@ -463,11 +491,17 @@ class XrayVpnService : VpnService() {
 
             serviceScope.launch(Dispatchers.IO) {
                 try {
-                    val socket = java.net.Socket()
-                    protect(socket) // Ensure socket bypasses TUN interface
-                    socket.tcpNoDelay = true
-                    val targetAddr = java.net.InetAddress.getByAddress(dstIp)
-                    socket.connect(InetSocketAddress(targetAddr, dstPort), 5000)
+                    val targetHost = try {
+                        InetAddress.getByAddress(dstIp).hostAddress ?: "127.0.0.1"
+                    } catch (_: Exception) {
+                        "127.0.0.1"
+                    }
+
+                    val socket = connectProxySocket(
+                        serverHost, serverPort, serverProtocol, serverUuid,
+                        serverSecurity, serverNetwork, serverPath, serverSni,
+                        targetHost, dstPort
+                    )
 
                     session.socket = socket
                     session.isConnected = true
@@ -509,21 +543,494 @@ class XrayVpnService : VpnService() {
             return
         }
 
-        if (payloadLen > 0 && existingSession.isConnected) {
+        if (payloadLen > 0) {
             val payload = ByteArray(payloadLen)
             System.arraycopy(buffer, headerLength + tcpHeaderLength, payload, 0, payloadLen)
             existingSession.clientSeq = (seqVal + payloadLen) and 0xFFFFFFFFL
 
             serviceScope.launch(Dispatchers.IO) {
                 try {
-                    existingSession.socket?.getOutputStream()?.write(payload)
-                    existingSession.socket?.getOutputStream()?.flush()
-                    sendTcpPacket(output, dstIp, srcIp, dstPort, srcPort, existingSession.serverSeq, existingSession.clientSeq, 0x10, null)
+                    var waitMs = 0
+                    while (!existingSession.isConnected && !existingSession.isClosed && waitMs < 5000) {
+                        delay(20)
+                        waitMs += 20
+                    }
+                    if (existingSession.isConnected && !existingSession.isClosed) {
+                        existingSession.socket?.getOutputStream()?.write(payload)
+                        existingSession.socket?.getOutputStream()?.flush()
+                        sendTcpPacket(output, dstIp, srcIp, dstPort, srcPort, existingSession.serverSeq, existingSession.clientSeq, 0x10, null)
+                    }
                 } catch (e: Exception) {
                     Log.d("XrayVpnService", "TCP socket write error: ${e.message}")
                 }
             }
         }
+    }
+
+    private fun connectProxySocket(
+        serverHost: String,
+        serverPort: Int,
+        serverProtocol: String,
+        serverUuid: String,
+        serverSecurity: String,
+        serverNetwork: String,
+        serverPath: String,
+        serverSni: String,
+        targetHost: String,
+        targetPort: Int
+    ): Socket {
+        return try {
+            when (serverProtocol.uppercase()) {
+                "VLESS" -> establishVlessConnection(serverHost, serverPort, serverUuid, serverSecurity, serverNetwork, serverPath, serverSni, targetHost, targetPort)
+                "TROJAN" -> establishTrojanConnection(serverHost, serverPort, serverUuid, serverSecurity, serverNetwork, serverPath, serverSni, targetHost, targetPort)
+                "SOCKS", "SOCKS5" -> establishSocks5Connection(serverHost, serverPort, serverUuid, targetHost, targetPort)
+                "VMESS" -> {
+                    try {
+                        establishVlessConnection(serverHost, serverPort, serverUuid, serverSecurity, serverNetwork, serverPath, serverSni, targetHost, targetPort)
+                    } catch (_: Exception) {
+                        establishTrojanConnection(serverHost, serverPort, serverUuid, serverSecurity, serverNetwork, serverPath, serverSni, targetHost, targetPort)
+                    }
+                }
+                else -> {
+                    try {
+                        establishVlessConnection(serverHost, serverPort, serverUuid, serverSecurity, serverNetwork, serverPath, serverSni, targetHost, targetPort)
+                    } catch (_: Exception) {
+                        establishDirectConnection(targetHost, targetPort)
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("XrayVpnService", "Proxy connect failed for $serverProtocol ($serverHost:$serverPort) to $targetHost:$targetPort - ${e.message}")
+            establishDirectConnection(targetHost, targetPort)
+        }
+    }
+
+    private fun establishDirectConnection(targetHost: String, targetPort: Int): Socket {
+        val socket = Socket()
+        protect(socket)
+        socket.tcpNoDelay = true
+        val targetAddr = InetAddress.getByName(targetHost)
+        socket.connect(InetSocketAddress(targetAddr, targetPort), 5000)
+        return socket
+    }
+
+    private fun establishVlessConnection(
+        serverHost: String,
+        serverPort: Int,
+        serverUuid: String,
+        serverSecurity: String,
+        serverNetwork: String,
+        serverPath: String,
+        serverSni: String,
+        targetHost: String,
+        targetPort: Int
+    ): Socket {
+        val rawSocket = Socket()
+        protect(rawSocket)
+        rawSocket.tcpNoDelay = true
+        rawSocket.connect(InetSocketAddress(serverHost, serverPort), 7000)
+
+        val socket = if (serverSecurity.equals("tls", ignoreCase = true) || serverSecurity.equals("reality", ignoreCase = true) || serverPort == 443) {
+            createTlsSocket(rawSocket, serverHost, serverPort, serverSni)
+        } else {
+            rawSocket
+        }
+
+        if (serverNetwork.equals("ws", ignoreCase = true)) {
+            performWsUpgrade(socket, serverHost, serverPath, serverSni)
+        }
+
+        val out = socket.getOutputStream()
+        val bos = ByteArrayOutputStream()
+
+        bos.write(0) // Version 0
+        bos.write(parseUuidToBytes(serverUuid))
+        bos.write(0) // Add length 0
+        bos.write(1) // Command: 1 = TCP
+
+        writeAddressAndPort(bos, targetHost, targetPort)
+        out.write(bos.toByteArray())
+        out.flush()
+
+        val input = socket.getInputStream()
+        val respHeader = ByteArray(2)
+        var read = 0
+        while (read < 2) {
+            val count = input.read(respHeader, read, 2 - read)
+            if (count < 0) break
+            read += count
+        }
+        if (read >= 2) {
+            val addLen = respHeader[1].toInt() and 0xFF
+            if (addLen > 0) {
+                val addBytes = ByteArray(addLen)
+                var addRead = 0
+                while (addRead < addLen) {
+                    val c = input.read(addBytes, addRead, addLen - addRead)
+                    if (c < 0) break
+                    addRead += c
+                }
+            }
+        }
+
+        return socket
+    }
+
+    private fun establishTrojanConnection(
+        serverHost: String,
+        serverPort: Int,
+        password: String,
+        serverSecurity: String,
+        serverNetwork: String,
+        serverPath: String,
+        serverSni: String,
+        targetHost: String,
+        targetPort: Int
+    ): Socket {
+        val rawSocket = Socket()
+        protect(rawSocket)
+        rawSocket.tcpNoDelay = true
+        rawSocket.connect(InetSocketAddress(serverHost, serverPort), 7000)
+
+        val socket = if (serverSecurity.equals("none", ignoreCase = true)) {
+            rawSocket
+        } else {
+            createTlsSocket(rawSocket, serverHost, serverPort, serverSni)
+        }
+
+        if (serverNetwork.equals("ws", ignoreCase = true)) {
+            performWsUpgrade(socket, serverHost, serverPath, serverSni)
+        }
+
+        val out = socket.getOutputStream()
+        val bos = ByteArrayOutputStream()
+
+        val hexPass = sha224Hex(password)
+        bos.write(hexPass.toByteArray(Charsets.US_ASCII))
+        bos.write(byteArrayOf(0x0D, 0x0A))
+        bos.write(1) // Command: 1 = TCP
+
+        val ipBytes = try { InetAddress.getByName(targetHost).address } catch (e: Exception) { null }
+        if (ipBytes != null && ipBytes.size == 4) {
+            bos.write(0x01)
+            bos.write(ipBytes)
+        } else if (ipBytes != null && ipBytes.size == 16) {
+            bos.write(0x04)
+            bos.write(ipBytes)
+        } else {
+            bos.write(0x03)
+            val domainBytes = targetHost.toByteArray(Charsets.UTF_8)
+            bos.write(domainBytes.size)
+            bos.write(domainBytes)
+        }
+        bos.write((targetPort ushr 8) and 0xFF)
+        bos.write(targetPort and 0xFF)
+        bos.write(byteArrayOf(0x0D, 0x0A))
+
+        out.write(bos.toByteArray())
+        out.flush()
+
+        return socket
+    }
+
+    private fun establishSocks5Connection(
+        serverHost: String,
+        serverPort: Int,
+        userInfo: String,
+        targetHost: String,
+        targetPort: Int
+    ): Socket {
+        val socket = Socket()
+        protect(socket)
+        socket.tcpNoDelay = true
+        socket.connect(InetSocketAddress(serverHost, serverPort), 7000)
+
+        val out = socket.getOutputStream()
+        val input = socket.getInputStream()
+
+        if (userInfo.contains(":")) {
+            out.write(byteArrayOf(0x05, 0x02, 0x00, 0x02))
+        } else {
+            out.write(byteArrayOf(0x05, 0x01, 0x00))
+        }
+        out.flush()
+
+        val resp = ByteArray(2)
+        input.read(resp)
+        if (resp[1] == 0x02.toByte() && userInfo.contains(":")) {
+            val parts = userInfo.split(":", limit = 2)
+            val user = parts[0].toByteArray(Charsets.UTF_8)
+            val pass = parts[1].toByteArray(Charsets.UTF_8)
+            val authBos = ByteArrayOutputStream()
+            authBos.write(0x01)
+            authBos.write(user.size)
+            authBos.write(user)
+            authBos.write(pass.size)
+            authBos.write(pass)
+            out.write(authBos.toByteArray())
+            out.flush()
+
+            val authResp = ByteArray(2)
+            input.read(authResp)
+            if (authResp[1] != 0x00.toByte()) {
+                throw Exception("SOCKS5 Auth failed")
+            }
+        }
+
+        val connBos = ByteArrayOutputStream()
+        connBos.write(0x05)
+        connBos.write(0x01) // CONNECT
+        connBos.write(0x00) // RSV
+
+        val ipBytes = try { InetAddress.getByName(targetHost).address } catch (e: Exception) { null }
+        if (ipBytes != null && ipBytes.size == 4) {
+            connBos.write(0x01)
+            connBos.write(ipBytes)
+        } else {
+            connBos.write(0x03)
+            val domainBytes = targetHost.toByteArray(Charsets.UTF_8)
+            connBos.write(domainBytes.size)
+            connBos.write(domainBytes)
+        }
+        connBos.write((targetPort ushr 8) and 0xFF)
+        connBos.write(targetPort and 0xFF)
+
+        out.write(connBos.toByteArray())
+        out.flush()
+
+        val reply = ByteArray(10)
+        input.read(reply)
+        if (reply[1] != 0x00.toByte()) {
+            throw Exception("SOCKS5 Connect rejected code: ${reply[1]}")
+        }
+
+        return socket
+    }
+
+    private fun createTlsSocket(plainSocket: Socket, host: String, port: Int, sniHost: String?): Socket {
+        val sslContext = SSLContext.getInstance("TLS")
+        val trustAllCerts = arrayOf<TrustManager>(object : X509TrustManager {
+            override fun checkClientTrusted(chain: Array<out java.security.cert.X509Certificate>?, authType: String?) {}
+            override fun checkServerTrusted(chain: Array<out java.security.cert.X509Certificate>?, authType: String?) {}
+            override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = arrayOf()
+        })
+        sslContext.init(null, trustAllCerts, java.security.SecureRandom())
+        val factory = sslContext.socketFactory
+        val sslSocket = factory.createSocket(plainSocket, host, port, true) as SSLSocket
+
+        val sni = if (!sniHost.isNullOrBlank()) sniHost else host
+        try {
+            val sslParams = sslSocket.sslParameters
+            sslParams.serverNames = listOf(javax.net.ssl.SNIHostName(sni))
+            sslSocket.sslParameters = sslParams
+        } catch (e: Exception) {
+            Log.w("XrayVpnService", "Failed to set SNI hostname: ${e.message}")
+        }
+
+        sslSocket.startHandshake()
+        return sslSocket
+    }
+
+    private fun performWsUpgrade(socket: Socket, host: String, path: String, sni: String) {
+        val wsPath = if (path.startsWith("/")) path else "/$path"
+        val wsHost = if (sni.isNotEmpty()) sni else host
+        val key = android.util.Base64.encodeToString(ByteArray(16).also { java.security.SecureRandom().nextBytes(it) }, android.util.Base64.NO_WRAP)
+
+        val req = "GET $wsPath HTTP/1.1\r\n" +
+                "Host: $wsHost\r\n" +
+                "Upgrade: websocket\r\n" +
+                "Connection: Upgrade\r\n" +
+                "Sec-WebSocket-Key: $key\r\n" +
+                "Sec-WebSocket-Version: 13\r\n" +
+                "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\r\n\r\n"
+
+        val out = socket.getOutputStream()
+        out.write(req.toByteArray(Charsets.UTF_8))
+        out.flush()
+
+        val reader = java.io.BufferedReader(java.io.InputStreamReader(socket.getInputStream(), Charsets.UTF_8))
+        val firstLine = reader.readLine() ?: ""
+        if (!firstLine.contains("101")) {
+            throw Exception("WebSocket Handshake failed: $firstLine")
+        }
+        while (true) {
+            val line = reader.readLine()
+            if (line.isNullOrEmpty()) break
+        }
+    }
+
+    private fun parseUuidToBytes(uuidStr: String): ByteArray {
+        return try {
+            val clean = uuidStr.replace("-", "")
+            if (clean.length == 32) {
+                val bytes = ByteArray(16)
+                for (i in 0 until 16) {
+                    bytes[i] = clean.substring(i * 2, i * 2 + 2).toInt(16).toByte()
+                }
+                bytes
+            } else {
+                val uuid = UUID.fromString(uuidStr)
+                val bb = ByteBuffer.allocate(16)
+                bb.putLong(uuid.mostSignificantBits)
+                bb.putLong(uuid.leastSignificantBits)
+                bb.array()
+            }
+        } catch (_: Exception) {
+            ByteArray(16)
+        }
+    }
+
+    private fun writeAddressAndPort(bos: ByteArrayOutputStream, host: String, port: Int) {
+        val ipBytes = try { InetAddress.getByName(host).address } catch (_: Exception) { null }
+        if (ipBytes != null && ipBytes.size == 4) {
+            bos.write(1) // IPv4
+            bos.write(ipBytes)
+        } else if (ipBytes != null && ipBytes.size == 16) {
+            bos.write(3) // IPv6
+            bos.write(ipBytes)
+        } else {
+            bos.write(2) // Domain
+            val domainBytes = host.toByteArray(Charsets.UTF_8)
+            bos.write(domainBytes.size)
+            bos.write(domainBytes)
+        }
+        bos.write((port ushr 8) and 0xFF)
+        bos.write(port and 0xFF)
+    }
+
+    private fun sha224Hex(input: String): String {
+        val md = MessageDigest.getInstance("SHA-224")
+        val digest = md.digest(input.toByteArray(Charsets.UTF_8))
+        return digest.joinToString("") { "%02x".format(it) }
+    }
+
+    private fun forwardDnsQuery(
+        dnsPayload: ByteArray,
+        clientIp: ByteArray,
+        clientPort: Int,
+        dnsServerIp: ByteArray,
+        dnsPort: Int,
+        output: FileOutputStream
+    ) {
+        serviceScope.launch(Dispatchers.IO) {
+            var dohSuccess = false
+            // Try Cloudflare DoH first
+            try {
+                val reqBody = dnsPayload.toRequestBody("application/dns-message".toMediaType())
+                val request = Request.Builder()
+                    .url("https://1.1.1.1/dns-query")
+                    .post(reqBody)
+                    .header("Accept", "application/dns-message")
+                    .header("User-Agent", "Mozilla/5.0")
+                    .build()
+
+                val response = okHttpClient.newCall(request).execute()
+                if (response.isSuccessful) {
+                    val respDnsPayload = response.body?.bytes()
+                    if (respDnsPayload != null && respDnsPayload.isNotEmpty()) {
+                        sendUdpPacketToTun(output, dnsServerIp, dnsPort, clientIp, clientPort, respDnsPayload)
+                        dohSuccess = true
+                    }
+                }
+            } catch (e: Exception) {
+                Log.d("XrayVpnService", "Cloudflare DoH error: ${e.message}")
+            }
+
+            // Try Google DoH if Cloudflare fails
+            if (!dohSuccess) {
+                try {
+                    val reqBody = dnsPayload.toRequestBody("application/dns-message".toMediaType())
+                    val request = Request.Builder()
+                        .url("https://dns.google/dns-query")
+                        .post(reqBody)
+                        .header("Accept", "application/dns-message")
+                        .header("User-Agent", "Mozilla/5.0")
+                        .build()
+
+                    val response = okHttpClient.newCall(request).execute()
+                    if (response.isSuccessful) {
+                        val respDnsPayload = response.body?.bytes()
+                        if (respDnsPayload != null && respDnsPayload.isNotEmpty()) {
+                            sendUdpPacketToTun(output, dnsServerIp, dnsPort, clientIp, clientPort, respDnsPayload)
+                            dohSuccess = true
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.d("XrayVpnService", "Google DoH error: ${e.message}")
+                }
+            }
+
+            // Fallback to standard UDP socket if DoH failed
+            if (!dohSuccess) {
+                try {
+                    java.net.DatagramSocket().use { socket ->
+                        protect(socket)
+                        socket.soTimeout = 3000
+                        val targetAddress = InetAddress.getByAddress(dnsServerIp)
+                        val outPacket = java.net.DatagramPacket(dnsPayload, dnsPayload.size, targetAddress, dnsPort)
+                        socket.send(outPacket)
+
+                        val respBuffer = ByteArray(4096)
+                        val inPacket = java.net.DatagramPacket(respBuffer, respBuffer.size)
+                        socket.receive(inPacket)
+
+                        val respDnsPayload = inPacket.data.copyOf(inPacket.length)
+                        sendUdpPacketToTun(output, dnsServerIp, dnsPort, clientIp, clientPort, respDnsPayload)
+                    }
+                } catch (e: Exception) {
+                    Log.d("XrayVpnService", "UDP DNS fallback error: ${e.message}")
+                }
+            }
+        }
+    }
+
+    private fun sendUdpPacketToTun(
+        output: FileOutputStream,
+        srcIp: ByteArray,
+        srcPort: Int,
+        dstIp: ByteArray,
+        dstPort: Int,
+        payload: ByteArray
+    ) {
+        val totalLen = 20 + 8 + payload.size
+        val responsePacket = ByteArray(totalLen)
+
+        responsePacket[0] = 0x45.toByte()
+        responsePacket[1] = 0.toByte()
+        responsePacket[2] = ((totalLen ushr 8) and 0xFF).toByte()
+        responsePacket[3] = (totalLen and 0xFF).toByte()
+        responsePacket[4] = 0x12.toByte()
+        responsePacket[5] = 0x34.toByte()
+        responsePacket[6] = 0x00.toByte()
+        responsePacket[7] = 0x00.toByte()
+        responsePacket[8] = 64.toByte()
+        responsePacket[9] = 17.toByte() // UDP
+
+        System.arraycopy(srcIp, 0, responsePacket, 12, 4)
+        System.arraycopy(dstIp, 0, responsePacket, 16, 4)
+
+        val ipChecksum = calculateChecksum(responsePacket, 0, 20)
+        responsePacket[10] = ((ipChecksum ushr 8) and 0xFF).toByte()
+        responsePacket[11] = (ipChecksum and 0xFF).toByte()
+
+        responsePacket[20] = ((srcPort ushr 8) and 0xFF).toByte()
+        responsePacket[21] = (srcPort and 0xFF).toByte()
+        responsePacket[22] = ((dstPort ushr 8) and 0xFF).toByte()
+        responsePacket[23] = (dstPort and 0xFF).toByte()
+        val udpLen = 8 + payload.size
+        responsePacket[24] = ((udpLen ushr 8) and 0xFF).toByte()
+        responsePacket[25] = (udpLen and 0xFF).toByte()
+
+        System.arraycopy(payload, 0, responsePacket, 28, payload.size)
+
+        synchronized(output) {
+            try {
+                output.write(responsePacket)
+            } catch (e: Exception) {
+                Log.d("XrayVpnService", "Write UDP packet to TUN error: ${e.message}")
+            }
+        }
+        addRxBytes(responsePacket.size.toLong())
     }
 
     private fun launchSocketReader(session: TcpSession, output: FileOutputStream) {
@@ -571,7 +1078,7 @@ class XrayVpnService : VpnService() {
         // IPv4 Header
         packet[0] = 0x45.toByte()
         packet[1] = 0.toByte()
-        packet[2] = ((totalLen shr 8) and 0xFF).toByte()
+        packet[2] = ((totalLen ushr 8) and 0xFF).toByte()
         packet[3] = (totalLen and 0xFF).toByte()
         packet[4] = 0x12.toByte()
         packet[5] = 0x34.toByte()
@@ -585,23 +1092,23 @@ class XrayVpnService : VpnService() {
         System.arraycopy(dstIp, 0, packet, 16, 4)
 
         val ipChecksum = calculateChecksum(packet, 0, 20)
-        packet[10] = ((ipChecksum shr 8) and 0xFF).toByte()
+        packet[10] = ((ipChecksum ushr 8) and 0xFF).toByte()
         packet[11] = (ipChecksum and 0xFF).toByte()
 
         // TCP Header
-        packet[20] = ((srcPort shr 8) and 0xFF).toByte()
+        packet[20] = ((srcPort ushr 8) and 0xFF).toByte()
         packet[21] = (srcPort and 0xFF).toByte()
-        packet[22] = ((dstPort shr 8) and 0xFF).toByte()
+        packet[22] = ((dstPort ushr 8) and 0xFF).toByte()
         packet[23] = (dstPort and 0xFF).toByte()
 
-        packet[24] = ((seqNum shr 24) and 0xFF).toByte()
-        packet[25] = ((seqNum shr 16) and 0xFF).toByte()
-        packet[26] = ((seqNum shr 8) and 0xFF).toByte()
+        packet[24] = ((seqNum ushr 24) and 0xFF).toByte()
+        packet[25] = ((seqNum ushr 16) and 0xFF).toByte()
+        packet[26] = ((seqNum ushr 8) and 0xFF).toByte()
         packet[27] = (seqNum and 0xFF).toByte()
 
-        packet[28] = ((ackNum shr 24) and 0xFF).toByte()
-        packet[29] = ((ackNum shr 16) and 0xFF).toByte()
-        packet[30] = ((ackNum shr 8) and 0xFF).toByte()
+        packet[28] = ((ackNum ushr 24) and 0xFF).toByte()
+        packet[29] = ((ackNum ushr 16) and 0xFF).toByte()
+        packet[30] = ((ackNum ushr 8) and 0xFF).toByte()
         packet[31] = (ackNum and 0xFF).toByte()
 
         packet[32] = 0x50.toByte()
@@ -619,7 +1126,7 @@ class XrayVpnService : VpnService() {
 
         val tcpLen = 20 + payloadSize
         val tcpChecksum = calculateTcpChecksum(srcIp, dstIp, packet, 20, tcpLen)
-        packet[36] = ((tcpChecksum shr 8) and 0xFF).toByte()
+        packet[36] = ((tcpChecksum ushr 8) and 0xFF).toByte()
         packet[37] = (tcpChecksum and 0xFF).toByte()
 
         synchronized(output) {
@@ -650,8 +1157,8 @@ class XrayVpnService : VpnService() {
         if (len > 0) {
             sum += (packet[i].toInt() and 0xFF) shl 8
         }
-        while ((sum shr 16) > 0) {
-            sum = (sum and 0xFFFF) + (sum shr 16)
+        while ((sum ushr 16) > 0) {
+            sum = (sum and 0xFFFF) + (sum ushr 16)
         }
         return (sum.inv() and 0xFFFF).toInt()
     }
@@ -669,7 +1176,7 @@ class XrayVpnService : VpnService() {
                 java.net.DatagramSocket().use { socket ->
                     protect(socket)
                     socket.soTimeout = 4000
-                    val targetAddress = java.net.InetAddress.getByAddress(serverIp)
+                    val targetAddress = InetAddress.getByAddress(serverIp)
                     val outPacket = java.net.DatagramPacket(udpPayload, udpPayload.size, targetAddress, serverPort)
                     socket.send(outPacket)
 
@@ -678,41 +1185,7 @@ class XrayVpnService : VpnService() {
                     socket.receive(inPacket)
 
                     val respPayload = inPacket.data.copyOf(inPacket.length)
-                    val totalLen = 20 + 8 + respPayload.size
-                    val responsePacket = ByteArray(totalLen)
-
-                    responsePacket[0] = 0x45.toByte()
-                    responsePacket[1] = 0.toByte()
-                    responsePacket[2] = ((totalLen shr 8) and 0xFF).toByte()
-                    responsePacket[3] = (totalLen and 0xFF).toByte()
-                    responsePacket[4] = 0x12.toByte()
-                    responsePacket[5] = 0x34.toByte()
-                    responsePacket[6] = 0x00.toByte()
-                    responsePacket[7] = 0x00.toByte()
-                    responsePacket[8] = 64.toByte()
-                    responsePacket[9] = 17.toByte()
-
-                    System.arraycopy(serverIp, 0, responsePacket, 12, 4)
-                    System.arraycopy(clientIp, 0, responsePacket, 16, 4)
-
-                    val ipChecksum = calculateChecksum(responsePacket, 0, 20)
-                    responsePacket[10] = ((ipChecksum shr 8) and 0xFF).toByte()
-                    responsePacket[11] = (ipChecksum and 0xFF).toByte()
-
-                    responsePacket[20] = ((serverPort shr 8) and 0xFF).toByte()
-                    responsePacket[21] = (serverPort and 0xFF).toByte()
-                    responsePacket[22] = ((clientPort shr 8) and 0xFF).toByte()
-                    responsePacket[23] = (clientPort and 0xFF).toByte()
-                    val udpLen = 8 + respPayload.size
-                    responsePacket[24] = ((udpLen shr 8) and 0xFF).toByte()
-                    responsePacket[25] = (udpLen and 0xFF).toByte()
-
-                    System.arraycopy(respPayload, 0, responsePacket, 28, respPayload.size)
-
-                    synchronized(output) {
-                        output.write(responsePacket)
-                    }
-                    addRxBytes(responsePacket.size.toLong())
+                    sendUdpPacketToTun(output, serverIp, serverPort, clientIp, clientPort, respPayload)
                 }
             } catch (_: Exception) {
             }
@@ -737,14 +1210,14 @@ class XrayVpnService : VpnService() {
             reply[10] = 0
             reply[11] = 0
             val ipChecksum = calculateChecksum(reply, 0, headerLength)
-            reply[10] = ((ipChecksum shr 8) and 0xFF).toByte()
+            reply[10] = ((ipChecksum ushr 8) and 0xFF).toByte()
             reply[11] = (ipChecksum and 0xFF).toByte()
 
             val icmpLen = length - headerLength
             reply[headerLength + 2] = 0
             reply[headerLength + 3] = 0
             val icmpChecksum = calculateChecksum(reply, headerLength, icmpLen)
-            reply[headerLength + 2] = ((icmpChecksum shr 8) and 0xFF).toByte()
+            reply[headerLength + 2] = ((icmpChecksum ushr 8) and 0xFF).toByte()
             reply[headerLength + 3] = (icmpChecksum and 0xFF).toByte()
 
             synchronized(output) {
@@ -753,72 +1226,6 @@ class XrayVpnService : VpnService() {
             addRxBytes(length.toLong())
         } catch (e: Exception) {
             Log.e("XrayVpnService", "ICMP reply error: ${e.message}")
-        }
-    }
-
-    private fun forwardDnsQuery(
-        dnsPayload: ByteArray,
-        clientIp: ByteArray,
-        clientPort: Int,
-        dnsServerIp: ByteArray,
-        dnsPort: Int,
-        output: FileOutputStream
-    ) {
-        serviceScope.launch(Dispatchers.IO) {
-            try {
-                java.net.DatagramSocket().use { socket ->
-                    protect(socket)
-                    socket.soTimeout = 3000
-
-                    val targetAddress = java.net.InetAddress.getByAddress(dnsServerIp)
-                    val outPacket = java.net.DatagramPacket(dnsPayload, dnsPayload.size, targetAddress, dnsPort)
-                    socket.send(outPacket)
-
-                    val respBuffer = ByteArray(4096)
-                    val inPacket = java.net.DatagramPacket(respBuffer, respBuffer.size)
-                    socket.receive(inPacket)
-
-                    val respDnsPayload = inPacket.data.copyOf(inPacket.length)
-
-                    val totalLen = 20 + 8 + respDnsPayload.size
-                    val responsePacket = ByteArray(totalLen)
-
-                    responsePacket[0] = 0x45.toByte()
-                    responsePacket[1] = 0.toByte()
-                    responsePacket[2] = ((totalLen shr 8) and 0xFF).toByte()
-                    responsePacket[3] = (totalLen and 0xFF).toByte()
-                    responsePacket[4] = 0x12.toByte()
-                    responsePacket[5] = 0x34.toByte()
-                    responsePacket[6] = 0x00.toByte()
-                    responsePacket[7] = 0x00.toByte()
-                    responsePacket[8] = 64.toByte()
-                    responsePacket[9] = 17.toByte()
-
-                    System.arraycopy(dnsServerIp, 0, responsePacket, 12, 4)
-                    System.arraycopy(clientIp, 0, responsePacket, 16, 4)
-
-                    val ipChecksum = calculateChecksum(responsePacket, 0, 20)
-                    responsePacket[10] = ((ipChecksum shr 8) and 0xFF).toByte()
-                    responsePacket[11] = (ipChecksum and 0xFF).toByte()
-
-                    responsePacket[20] = ((dnsPort shr 8) and 0xFF).toByte()
-                    responsePacket[21] = (dnsPort and 0xFF).toByte()
-                    responsePacket[22] = ((clientPort shr 8) and 0xFF).toByte()
-                    responsePacket[23] = (clientPort and 0xFF).toByte()
-                    val udpLen = 8 + respDnsPayload.size
-                    responsePacket[24] = ((udpLen shr 8) and 0xFF).toByte()
-                    responsePacket[25] = (udpLen and 0xFF).toByte()
-
-                    System.arraycopy(respDnsPayload, 0, responsePacket, 28, respDnsPayload.size)
-
-                    synchronized(output) {
-                        output.write(responsePacket)
-                    }
-                    addRxBytes(responsePacket.size.toLong())
-                }
-            } catch (e: Exception) {
-                Log.d("XrayVpnService", "DNS forward error: ${e.message}")
-            }
         }
     }
 
@@ -835,8 +1242,8 @@ class XrayVpnService : VpnService() {
         if (len > 0) {
             sum += (data[i].toInt() and 0xFF) shl 8
         }
-        while ((sum shr 16) > 0) {
-            sum = (sum and 0xFFFF) + (sum shr 16)
+        while ((sum ushr 16) > 0) {
+            sum = (sum and 0xFFFF) + (sum ushr 16)
         }
         return (sum.inv() and 0xFFFF).toInt()
     }
