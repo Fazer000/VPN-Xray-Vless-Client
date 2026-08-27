@@ -136,16 +136,16 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun addSubscription(url: String, name: String = "") {
+    fun addSubscription(url: String, name: String = "", customUserAgent: String = "") {
         viewModelScope.launch {
             _isSubLoading.value = true
-            _subStateMessage.value = "Updating subscription..."
-            val result = repository.addSubscription(url, name)
+            _subStateMessage.value = "Загрузка подписки..."
+            val result = repository.addSubscription(url, name, customUserAgent)
             _isSubLoading.value = false
             result.onSuccess {
-                _subStateMessage.value = "Subscription updated successfully (${it.serverCount} servers)."
+                _subStateMessage.value = "Подписка успешно обновлена (${it.serverCount} серверов)."
             }.onFailure { err ->
-                _subStateMessage.value = "Error: ${err.localizedMessage ?: "Failed to fetch subscription"}"
+                _subStateMessage.value = "Ошибка: ${err.localizedMessage ?: "Не удалось загрузить подписку"}"
             }
         }
     }

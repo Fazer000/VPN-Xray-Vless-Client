@@ -70,38 +70,84 @@ class VpnRepository(private val context: Context) {
         }
     }
 
-    suspend fun addSubscription(url: String, customName: String = ""): Result<Subscription> = withContext(Dispatchers.IO) {
+    suspend fun addSubscription(url: String, customName: String = "", customUserAgent: String = ""): Result<Subscription> = withContext(Dispatchers.IO) {
         try {
             val trimmedUrl = url.trim()
-            val request = Request.Builder()
-                .url(trimmedUrl)
-                .header("User-Agent", "v2rayTun/1.0.0 (Android) XrayVPN/1.0")
-                .build()
-
-            val response = httpClient.newCall(request).execute()
-            if (!response.isSuccessful) {
-                return@withContext Result.failure(Exception("HTTP error code: ${response.code}"))
+            val userAgentsToTry = if (customUserAgent.isNotBlank()) {
+                listOf(customUserAgent)
+            } else {
+                listOf(
+                    "v2rayNG/1.8.19 (Android; com.v2ray.ang)",
+                    "v2rayTun/1.5.8 (Android; com.v2raytun.android)",
+                    "Happ/1.2.0 (Android; com.happ.vpn)",
+                    "v2rayN/6.39",
+                    "ClashforWindows/0.20.39",
+                    "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile"
+                )
             }
 
-            val body = response.body?.string() ?: ""
+            var lastErrorMessage = ""
+            var successBody = ""
+            var parsedServers = emptyList<VpnServer>()
+
             val subId = UUID.nameUUIDFromBytes(trimmedUrl.toByteArray()).toString()
             val name = customName.ifEmpty { "Sub-${subId.take(6)}" }
 
-            val servers = ProtocolParser.parseSubscriptionContent(body, subId, name)
-            if (servers.isEmpty()) {
-                return@withContext Result.failure(Exception("No valid VLESS/VMess servers found in subscription link."))
+            for (ua in userAgentsToTry) {
+                try {
+                    val request = Request.Builder()
+                        .url(trimmedUrl)
+                        .header("User-Agent", ua)
+                        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8,text/plain")
+                        .header("Accept-Language", "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7")
+                        .header("Cache-Control", "no-cache")
+                        .build()
+
+                    val response = httpClient.newCall(request).execute()
+                    if (!response.isSuccessful) {
+                        lastErrorMessage = "HTTP ${response.code} ($ua)"
+                        continue
+                    }
+
+                    val body = response.body?.string() ?: ""
+
+                    if (ProtocolParser.isUnsupportedPanelResponse(body)) {
+                        lastErrorMessage = "Панель подписки отклонила клиент ($ua). Пробуем следующий..."
+                        continue
+                    }
+
+                    val servers = ProtocolParser.parseSubscriptionContent(body, subId, name)
+                    if (servers.isNotEmpty()) {
+                        successBody = body
+                        parsedServers = servers
+                        break
+                    } else {
+                        lastErrorMessage = "Не найдены серверы с User-Agent: $ua"
+                    }
+                } catch (e: Exception) {
+                    lastErrorMessage = "Ошибка при запросе ($ua): ${e.localizedMessage}"
+                }
+            }
+
+            if (parsedServers.isEmpty()) {
+                val errorReason = if (lastErrorMessage.contains("отклонила")) {
+                    "Панель подписки вернула: 'Приложение не поддерживается'. Все варианты User-Agent (v2rayNG, Happ, v2rayTun) были отклонены сервером."
+                } else {
+                    lastErrorMessage.ifEmpty { "Не найдено действительных конфигураций в подписке." }
+                }
+                return@withContext Result.failure(Exception(errorReason))
             }
 
             // Remove old servers for this subscription and insert updated ones
             serverDao.deleteServersBySubscription(subId)
-            serverDao.insertServers(servers)
+            serverDao.insertServers(parsedServers)
 
             val subscription = Subscription(
                 id = subId,
                 name = name,
                 url = trimmedUrl,
                 lastUpdated = System.currentTimeMillis(),
-                serverCount = servers.size
+                serverCount = parsedServers.size
             )
             subDao.insertSubscription(subscription)
 

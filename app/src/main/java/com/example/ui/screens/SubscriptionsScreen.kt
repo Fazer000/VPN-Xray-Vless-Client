@@ -156,8 +156,8 @@ fun SubscriptionsScreen(
     if (showAddDialog) {
         AddSubscriptionDialog(
             onDismiss = { showAddDialog = false },
-            onAdd = { url, name ->
-                viewModel.addSubscription(url, name)
+            onAdd = { url, name, userAgent ->
+                viewModel.addSubscription(url, name, userAgent)
                 showAddDialog = false
             }
         )
@@ -270,10 +270,19 @@ fun SubscriptionCard(
 @Composable
 fun AddSubscriptionDialog(
     onDismiss: () -> Unit,
-    onAdd: (url: String, name: String) -> Unit
+    onAdd: (url: String, name: String, userAgent: String) -> Unit
 ) {
     var urlText by remember { mutableStateOf("") }
     var nameText by remember { mutableStateOf("") }
+
+    val userAgentOptions = listOf(
+        "Auto (Happ / v2rayTun / v2rayNG)" to "",
+        "v2rayNG" to "v2rayNG/1.8.19 (Android; com.v2ray.ang)",
+        "Happ" to "Happ/1.2.0 (Android; com.happ.vpn)",
+        "v2rayTun" to "v2rayTun/1.5.8 (Android; com.v2raytun.android)",
+        "Clash" to "ClashforWindows/0.20.39"
+    )
+    var selectedUaIndex by remember { mutableIntStateOf(0) }
 
     val sampleUrl = "https://raw.githubusercontent.com/v2fly/fakedata/main/sub.txt"
 
@@ -281,12 +290,12 @@ fun AddSubscriptionDialog(
         onDismissRequest = onDismiss,
         containerColor = CyberSurface,
         title = {
-            Text("Add V2Ray Subscription", color = TextPrimary, fontWeight = FontWeight.Bold)
+            Text("Добавить подписку V2Ray", color = TextPrimary, fontWeight = FontWeight.Bold)
         },
         text = {
             Column {
-                Text("Enter subscription URL:", fontSize = 13.sp, color = TextSecondary)
-                Spacer(modifier = Modifier.height(8.dp))
+                Text("Введите URL подписки:", fontSize = 13.sp, color = TextSecondary)
+                Spacer(modifier = Modifier.height(6.dp))
                 OutlinedTextField(
                     value = urlText,
                     onValueChange = { urlText = it },
@@ -297,7 +306,7 @@ fun AddSubscriptionDialog(
                     shape = RoundedCornerShape(10.dp)
                 )
 
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(6.dp))
 
                 TextButton(
                     onClick = {
@@ -306,35 +315,57 @@ fun AddSubscriptionDialog(
                     },
                     modifier = Modifier.align(Alignment.End)
                 ) {
-                    Text("Use Demo Feed URL", fontSize = 12.sp, color = CyberCyan)
+                    Text("Тестовая ссылка", fontSize = 12.sp, color = CyberCyan)
                 }
 
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(6.dp))
 
-                Text("Custom Name (Optional):", fontSize = 13.sp, color = TextSecondary)
+                Text("Название (необязательно):", fontSize = 13.sp, color = TextSecondary)
                 Spacer(modifier = Modifier.height(4.dp))
                 OutlinedTextField(
                     value = nameText,
                     onValueChange = { nameText = it },
-                    placeholder = { Text("e.g. Premium V2Ray Feed", fontSize = 12.sp, color = TextSecondary) },
+                    placeholder = { Text("Например: Моя подписка", fontSize = 12.sp, color = TextSecondary) },
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(10.dp)
                 )
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Text("Эмуляция клиента (User-Agent):", fontSize = 13.sp, color = TextSecondary)
+                Spacer(modifier = Modifier.height(6.dp))
+
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    userAgentOptions.forEachIndexed { index, (label, _) ->
+                        FilterChip(
+                            selected = selectedUaIndex == index,
+                            onClick = { selectedUaIndex = index },
+                            label = { Text(label, fontSize = 12.sp) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = CyberCyan,
+                                selectedLabelColor = Color.Black,
+                                containerColor = CyberSurfaceVariant,
+                                labelColor = TextPrimary
+                            ),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                }
             }
         },
         confirmButton = {
             Button(
-                onClick = { onAdd(urlText, nameText) },
+                onClick = { onAdd(urlText, nameText, userAgentOptions[selectedUaIndex].second) },
                 enabled = urlText.isNotBlank(),
                 colors = ButtonDefaults.buttonColors(containerColor = CyberCyan, contentColor = Color.Black),
                 modifier = Modifier.testTag("confirm_add_sub_btn")
             ) {
-                Text("Fetch & Add", fontWeight = FontWeight.Bold)
+                Text("Загрузить и добавить", fontWeight = FontWeight.Bold)
             }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) {
-                Text("Cancel", color = TextSecondary)
+                Text("Отмена", color = TextSecondary)
             }
         }
     )
