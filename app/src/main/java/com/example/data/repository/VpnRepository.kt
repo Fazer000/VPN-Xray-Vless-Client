@@ -83,12 +83,18 @@ class VpnRepository(private val context: Context) {
                     listOf(customUserAgent)
                 } else {
                     listOf(
-                        "Happ/1.2.0 (Android; com.happ.vpn)",
-                        "sing-box/1.8.0 (Android)",
-                        "v2rayTun/1.5.8 (Android; com.v2raytun.android)",
-                        "v2rayNG/1.8.19 (Android; com.v2ray.ang)",
+                        "v2rayTun",
+                        "v2rayTun/1.5.8",
+                        "v2rayNG/1.8.19",
+                        "v2rayNG/1.8.5",
+                        "Happ/1.2.0",
+                        "Happ",
+                        "sing-box/1.8.0",
+                        "sing-box",
+                        "Clash.Meta",
                         "Clash/1.18.0",
-                        "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile"
+                        "NekoBox/1.3.0",
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
                     )
                 }
 
@@ -99,7 +105,7 @@ class VpnRepository(private val context: Context) {
                         val request = Request.Builder()
                             .url(trimmedUrl)
                             .header("User-Agent", ua)
-                            .header("Accept", "application/json, text/plain, text/html, */*")
+                            .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.7")
                             .header("Accept-Language", "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7")
                             .header("Cache-Control", "no-cache")
                             .build()
@@ -111,18 +117,19 @@ class VpnRepository(private val context: Context) {
                         }
 
                         val body = response.body?.string() ?: ""
+                        if (body.isBlank()) continue
 
-                        if (ProtocolParser.isUnsupportedPanelResponse(body)) {
-                            lastErrorMessage = "Панель подписки отклонила клиент ($ua)."
-                            continue
-                        }
-
+                        // Try parsing servers first before flagging as error body
                         val servers = ProtocolParser.parseSubscriptionContent(body, subId, name)
                         if (servers.isNotEmpty()) {
                             parsedServers = servers
                             break
                         } else {
-                            lastErrorMessage = "Не найдены серверы при ответе от панели ($ua)"
+                            if (ProtocolParser.isHtmlOrErrorBody(body)) {
+                                lastErrorMessage = "Панель подписки отклонила клиент ($ua)."
+                            } else {
+                                lastErrorMessage = "Не найдены серверы в ответе от подписки ($ua)"
+                            }
                         }
                     } catch (e: Exception) {
                         lastErrorMessage = "Ошибка подписки ($ua): ${e.localizedMessage}"
@@ -131,7 +138,7 @@ class VpnRepository(private val context: Context) {
 
                 if (parsedServers.isEmpty()) {
                     val errorReason = if (lastErrorMessage.contains("отклонила")) {
-                        "Панель подписки вернула: 'Приложение не поддерживается'. Попробуйте вставить JSON-конфиг напрямую или сменить User-Agent."
+                        "Не удалось загрузить подписку. Панель запросила специфический клиент. Попробуйте указать кастомный User-Agent в настройках подписки."
                     } else {
                         lastErrorMessage.ifEmpty { "Не найдено действительных конфигураций в подписке." }
                     }

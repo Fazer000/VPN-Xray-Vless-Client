@@ -12,7 +12,7 @@ import java.util.UUID
 object ProtocolParser {
 
     fun parseLink(rawLink: String, subscriptionId: String = "manual", defaultGroup: String = "Default"): VpnServer? {
-        val trimmed = rawLink.trim()
+        val trimmed = rawLink.trim().removePrefix("\uFEFF")
         return when {
             trimmed.startsWith("vless://", ignoreCase = true) -> parseVless(trimmed, subscriptionId, defaultGroup)
             trimmed.startsWith("vmess://", ignoreCase = true) -> parseVmess(trimmed, subscriptionId, defaultGroup)
@@ -26,23 +26,30 @@ object ProtocolParser {
 
     private fun parseVless(link: String, subscriptionId: String, defaultGroup: String): VpnServer? {
         return try {
-            val uri = Uri.parse(link)
+            val cleanLink = link.trim()
+            val fragment = if (cleanLink.contains("#")) cleanLink.substringAfter("#") else ""
+            val linkNoFragment = if (cleanLink.contains("#")) cleanLink.substringBefore("#") else cleanLink
+
+            val name = if (fragment.isNotEmpty()) {
+                try { URLDecoder.decode(fragment, "UTF-8") } catch (_: Exception) { fragment }
+            } else "VLESS Server"
+
+            val uri = Uri.parse(linkNoFragment)
             val userInfo = uri.userInfo ?: ""
             val uuid = userInfo.ifEmpty { "00000000-0000-0000-0000-000000000000" }
             val host = uri.host ?: return null
             val port = if (uri.port > 0) uri.port else 443
-            val fragment = uri.fragment ?: ""
-            val name = if (fragment.isNotEmpty()) URLDecoder.decode(fragment, "UTF-8") else "VLESS $host"
 
-            val security = uri.getQueryParameter("security") ?: "tls"
-            val network = uri.getQueryParameter("type") ?: uri.getQueryParameter("network") ?: "tcp"
-            val path = uri.getQueryParameter("path")?.let { URLDecoder.decode(it, "UTF-8") } ?: ""
+            val security = uri.getQueryParameter("security") ?: uri.getQueryParameter("encryption") ?: "tls"
+            val network = uri.getQueryParameter("type") ?: uri.getQueryParameter("network") ?: uri.getQueryParameter("headerType") ?: "tcp"
+            val rawPath = uri.getQueryParameter("path") ?: ""
+            val path = try { URLDecoder.decode(rawPath, "UTF-8") } catch (_: Exception) { rawPath }
             val sni = uri.getQueryParameter("sni") ?: uri.getQueryParameter("host") ?: host
 
             val group = extractGroupFromName(name, defaultGroup)
 
             VpnServer(
-                id = generateId(link, host, port, uuid),
+                id = generateId(cleanLink, host, port, uuid),
                 subscriptionId = subscriptionId,
                 name = name,
                 protocol = VpnProtocol.VLESS,
@@ -54,17 +61,17 @@ object ProtocolParser {
                 path = path,
                 sni = sni,
                 groupName = group,
-                rawLink = link
+                rawLink = cleanLink
             )
         } catch (e: Exception) {
-            e.printStackTrace()
             null
         }
     }
 
     private fun parseVmess(link: String, subscriptionId: String, defaultGroup: String): VpnServer? {
         return try {
-            val base64Data = link.substringAfter("vmess://").trim()
+            val cleanLink = link.trim()
+            val base64Data = cleanLink.substringAfter("vmess://").substringBefore("#").trim()
             val jsonString = decodeBase64Safe(base64Data)
             val json = JSONObject(jsonString)
 
@@ -83,7 +90,7 @@ object ProtocolParser {
             val group = extractGroupFromName(name, defaultGroup)
 
             VpnServer(
-                id = generateId(link, host, port, uuid),
+                id = generateId(cleanLink, host, port, uuid),
                 subscriptionId = subscriptionId,
                 name = name,
                 protocol = VpnProtocol.VMESS,
@@ -96,32 +103,38 @@ object ProtocolParser {
                 path = path,
                 sni = sni,
                 groupName = group,
-                rawLink = link
+                rawLink = cleanLink
             )
         } catch (e: Exception) {
-            e.printStackTrace()
             null
         }
     }
 
     private fun parseTrojan(link: String, subscriptionId: String, defaultGroup: String): VpnServer? {
         return try {
-            val uri = Uri.parse(link)
+            val cleanLink = link.trim()
+            val fragment = if (cleanLink.contains("#")) cleanLink.substringAfter("#") else ""
+            val linkNoFragment = if (cleanLink.contains("#")) cleanLink.substringBefore("#") else cleanLink
+
+            val name = if (fragment.isNotEmpty()) {
+                try { URLDecoder.decode(fragment, "UTF-8") } catch (_: Exception) { fragment }
+            } else "Trojan Server"
+
+            val uri = Uri.parse(linkNoFragment)
             val password = uri.userInfo ?: ""
             val host = uri.host ?: return null
             val port = if (uri.port > 0) uri.port else 443
-            val fragment = uri.fragment ?: ""
-            val name = if (fragment.isNotEmpty()) URLDecoder.decode(fragment, "UTF-8") else "Trojan $host"
 
             val security = uri.getQueryParameter("security") ?: "tls"
             val network = uri.getQueryParameter("type") ?: uri.getQueryParameter("network") ?: "tcp"
-            val path = uri.getQueryParameter("path")?.let { URLDecoder.decode(it, "UTF-8") } ?: ""
+            val rawPath = uri.getQueryParameter("path") ?: ""
+            val path = try { URLDecoder.decode(rawPath, "UTF-8") } catch (_: Exception) { rawPath }
             val sni = uri.getQueryParameter("sni") ?: uri.getQueryParameter("host") ?: host
 
             val group = extractGroupFromName(name, defaultGroup)
 
             VpnServer(
-                id = generateId(link, host, port, password),
+                id = generateId(cleanLink, host, port, password),
                 subscriptionId = subscriptionId,
                 name = name,
                 protocol = VpnProtocol.TROJAN,
@@ -133,21 +146,22 @@ object ProtocolParser {
                 path = path,
                 sni = sni,
                 groupName = group,
-                rawLink = link
+                rawLink = cleanLink
             )
         } catch (e: Exception) {
-            e.printStackTrace()
             null
         }
     }
 
     private fun parseShadowsocks(link: String, subscriptionId: String, defaultGroup: String): VpnServer? {
         return try {
-            // ss://base64(method:password@host:port)#remark or ss://base64(method:password)@host:port#remark
-            val raw = link.substringAfter("ss://")
+            val cleanLink = link.trim()
+            val raw = cleanLink.substringAfter("ss://")
             val fragment = if (raw.contains("#")) raw.substringAfter("#") else ""
             val linkBody = if (raw.contains("#")) raw.substringBefore("#") else raw
-            val name = if (fragment.isNotEmpty()) URLDecoder.decode(fragment, "UTF-8") else "Shadowsocks"
+            val name = if (fragment.isNotEmpty()) {
+                try { URLDecoder.decode(fragment, "UTF-8") } catch (_: Exception) { fragment }
+            } else "Shadowsocks"
 
             var host = ""
             var port = 8388
@@ -158,7 +172,7 @@ object ProtocolParser {
                 val serverPart = linkBody.substringAfter("@")
 
                 val decodedUser = decodeBase64Safe(userPart)
-                uuidPassword = decodedUser
+                uuidPassword = if (decodedUser.contains(":")) decodedUser else userPart
 
                 val hostPort = serverPart.substringBefore("?")
                 host = hostPort.substringBefore(":")
@@ -178,7 +192,7 @@ object ProtocolParser {
             val group = extractGroupFromName(name, defaultGroup)
 
             VpnServer(
-                id = generateId(link, host, port, uuidPassword),
+                id = generateId(cleanLink, host, port, uuidPassword),
                 subscriptionId = subscriptionId,
                 name = name,
                 protocol = VpnProtocol.SHADOWSOCKS,
@@ -188,26 +202,30 @@ object ProtocolParser {
                 security = "none",
                 network = "tcp",
                 groupName = group,
-                rawLink = link
+                rawLink = cleanLink
             )
         } catch (e: Exception) {
-            e.printStackTrace()
             null
         }
     }
 
     private fun parseSocks(link: String, subscriptionId: String, defaultGroup: String): VpnServer? {
         return try {
-            val uri = Uri.parse(link)
+            val cleanLink = link.trim()
+            val fragment = if (cleanLink.contains("#")) cleanLink.substringAfter("#") else ""
+            val linkNoFragment = if (cleanLink.contains("#")) cleanLink.substringBefore("#") else cleanLink
+            val name = if (fragment.isNotEmpty()) {
+                try { URLDecoder.decode(fragment, "UTF-8") } catch (_: Exception) { fragment }
+            } else "SOCKS5 Server"
+
+            val uri = Uri.parse(linkNoFragment)
             val host = uri.host ?: return null
             val port = if (uri.port > 0) uri.port else 1080
             val userInfo = uri.userInfo ?: ""
-            val fragment = uri.fragment ?: ""
-            val name = if (fragment.isNotEmpty()) URLDecoder.decode(fragment, "UTF-8") else "SOCKS5 $host"
             val group = extractGroupFromName(name, defaultGroup)
 
             VpnServer(
-                id = generateId(link, host, port, userInfo),
+                id = generateId(cleanLink, host, port, userInfo),
                 subscriptionId = subscriptionId,
                 name = name,
                 protocol = VpnProtocol.SOCKS,
@@ -217,28 +235,32 @@ object ProtocolParser {
                 security = "none",
                 network = "tcp",
                 groupName = group,
-                rawLink = link
+                rawLink = cleanLink
             )
         } catch (e: Exception) {
-            e.printStackTrace()
             null
         }
     }
 
     private fun parseHysteria2(link: String, subscriptionId: String, defaultGroup: String): VpnServer? {
         return try {
-            val uri = Uri.parse(link)
+            val cleanLink = link.trim()
+            val fragment = if (cleanLink.contains("#")) cleanLink.substringAfter("#") else ""
+            val linkNoFragment = if (cleanLink.contains("#")) cleanLink.substringBefore("#") else cleanLink
+            val name = if (fragment.isNotEmpty()) {
+                try { URLDecoder.decode(fragment, "UTF-8") } catch (_: Exception) { fragment }
+            } else "Hysteria2 Server"
+
+            val uri = Uri.parse(linkNoFragment)
             val auth = uri.userInfo ?: ""
             val host = uri.host ?: return null
             val port = if (uri.port > 0) uri.port else 443
-            val fragment = uri.fragment ?: ""
-            val name = if (fragment.isNotEmpty()) URLDecoder.decode(fragment, "UTF-8") else "Hysteria2 $host"
             val sni = uri.getQueryParameter("sni") ?: host
 
             val group = extractGroupFromName(name, defaultGroup)
 
             VpnServer(
-                id = generateId(link, host, port, auth),
+                id = generateId(cleanLink, host, port, auth),
                 subscriptionId = subscriptionId,
                 name = name,
                 protocol = VpnProtocol.HYSTERIA2,
@@ -249,64 +271,151 @@ object ProtocolParser {
                 network = "udp",
                 sni = sni,
                 groupName = group,
-                rawLink = link
+                rawLink = cleanLink
             )
         } catch (e: Exception) {
-            e.printStackTrace()
             null
         }
     }
 
     fun parseSubscriptionContent(content: String, subscriptionId: String, groupName: String): List<VpnServer> {
-        val trimmedContent = content.trim()
+        val cleanContent = content.trim().removePrefix("\uFEFF")
+        if (cleanContent.isEmpty()) return emptyList()
 
-        // Detect if response is HTML or panel error message
-        if (isUnsupportedPanelResponse(trimmedContent)) {
-            throw IllegalArgumentException("Subscription panel error: Unsupported application or access restricted.")
+        // 1. Direct JSON (Sing-box / Xray / V2Ray)
+        val jsonServers = parseJsonConfig(cleanContent, subscriptionId, groupName)
+        if (jsonServers.isNotEmpty()) return jsonServers
+
+        // 2. Base64 decoded content
+        val decoded = decodeBase64Safe(cleanContent)
+        if (decoded != cleanContent && decoded.isNotBlank()) {
+            val decodedJson = parseJsonConfig(decoded, subscriptionId, groupName)
+            if (decodedJson.isNotEmpty()) return decodedJson
         }
 
-        // 1. Try parsing direct JSON
-        val directJsonServers = parseJsonConfig(trimmedContent, subscriptionId, groupName)
-        if (directJsonServers.isNotEmpty()) {
-            return directJsonServers
-        }
-
-        // 2. Try parsing decoded base64 as JSON
-        val decoded = decodeBase64Safe(trimmedContent)
-        val decodedJsonServers = parseJsonConfig(decoded, subscriptionId, groupName)
-        if (decodedJsonServers.isNotEmpty()) {
-            return decodedJsonServers
-        }
-
-        // 3. Fallback to line-by-line URI parsing
-        val containsProtocols = { str: String ->
-            str.contains("vless://", ignoreCase = true) ||
-            str.contains("vmess://", ignoreCase = true) ||
-            str.contains("trojan://", ignoreCase = true) ||
-            str.contains("ss://", ignoreCase = true) ||
-            str.contains("socks://", ignoreCase = true) ||
-            str.contains("hy2://", ignoreCase = true) ||
-            str.contains("hysteria2://", ignoreCase = true)
-        }
-
-        val targetContent = if (containsProtocols(decoded)) decoded else trimmedContent
-
-        val rawLines = mutableListOf<String>()
-        targetContent.lines().forEach { line ->
-            val lineClean = line.trim()
-            if (lineClean.isNotEmpty() && !lineClean.startsWith("#")) {
-                rawLines.add(lineClean)
+        // 3. Clash YAML format
+        if (cleanContent.contains("proxies:") || decoded.contains("proxies:")) {
+            val yamlServers = parseClashYaml(cleanContent, subscriptionId, groupName).ifEmpty {
+                parseClashYaml(decoded, subscriptionId, groupName)
             }
+            if (yamlServers.isNotEmpty()) return yamlServers
         }
 
+        // 4. Line-by-line URI parsing (checking both decoded base64 and original content)
+        val candidates = listOf(decoded, cleanContent)
         val servers = mutableListOf<VpnServer>()
-        for (line in rawLines) {
-            val server = parseLink(line, subscriptionId, groupName)
-            if (server != null) {
-                servers.add(server)
+        val seenIds = mutableSetOf<String>()
+
+        for (candidate in candidates) {
+            candidate.lines().forEach { line ->
+                val trimmedLine = line.trim()
+                if (trimmedLine.isNotEmpty() && !trimmedLine.startsWith("#")) {
+                    var server = parseLink(trimmedLine, subscriptionId, groupName)
+                    if (server == null && trimmedLine.length > 25 && !trimmedLine.contains("://")) {
+                        val decodedLine = decodeBase64Safe(trimmedLine)
+                        if (decodedLine != trimmedLine) {
+                            server = parseLink(decodedLine, subscriptionId, groupName)
+                        }
+                    }
+                    if (server != null && seenIds.add(server.id)) {
+                        servers.add(server)
+                    }
+                }
             }
+            if (servers.isNotEmpty()) break
         }
+
         return servers
+    }
+
+    fun parseClashYaml(content: String, subscriptionId: String, defaultGroup: String): List<VpnServer> {
+        val servers = mutableListOf<VpnServer>()
+        try {
+            val lines = content.lines()
+            var insideProxies = false
+            val currentMap = mutableMapOf<String, String>()
+
+            fun flushCurrent() {
+                if (currentMap.isNotEmpty()) {
+                    val type = currentMap["type"]?.lowercase() ?: ""
+                    val name = currentMap["name"] ?: "Clash Node"
+                    val server = currentMap["server"] ?: ""
+                    val port = currentMap["port"]?.toIntOrNull() ?: 443
+                    val uuid = currentMap["uuid"] ?: currentMap["password"] ?: ""
+                    val tls = currentMap["tls"] == "true" || currentMap["security"] == "tls"
+                    val sni = currentMap["servername"] ?: currentMap["sni"] ?: server
+                    val network = currentMap["network"] ?: currentMap["type"] ?: "tcp"
+                    val path = currentMap["path"] ?: ""
+
+                    val protocol = when (type) {
+                        "vless" -> VpnProtocol.VLESS
+                        "vmess" -> VpnProtocol.VMESS
+                        "trojan" -> VpnProtocol.TROJAN
+                        "ss", "shadowsocks" -> VpnProtocol.SHADOWSOCKS
+                        "hysteria2", "hy2" -> VpnProtocol.HYSTERIA2
+                        "socks5", "socks" -> VpnProtocol.SOCKS
+                        else -> null
+                    }
+
+                    if (protocol != null && server.isNotEmpty()) {
+                        val group = extractGroupFromName(name, defaultGroup)
+                        val rawLink = buildV2RayUri(protocol, uuid, server, port, network, if (tls) "tls" else "none", path, sni, name)
+                        servers.add(
+                            VpnServer(
+                                id = generateId(rawLink, server, port, uuid),
+                                subscriptionId = subscriptionId,
+                                name = name,
+                                protocol = protocol,
+                                host = server,
+                                port = port,
+                                uuid = uuid,
+                                security = if (tls) "tls" else "none",
+                                network = network,
+                                path = path,
+                                sni = sni,
+                                groupName = group,
+                                rawLink = rawLink
+                            )
+                        )
+                    }
+                    currentMap.clear()
+                }
+            }
+
+            for (line in lines) {
+                val trimmed = line.trim()
+                if (trimmed == "proxies:") {
+                    insideProxies = true
+                    continue
+                }
+                if (insideProxies) {
+                    if (trimmed.startsWith("- name:") || trimmed.startsWith("- { name:")) {
+                        flushCurrent()
+                    }
+                    if (trimmed.startsWith("proxy-groups:") || trimmed.startsWith("rules:")) {
+                        flushCurrent()
+                        insideProxies = false
+                        break
+                    }
+                    val parts = trimmed.removePrefix("- ").split(":", limit = 2)
+                    if (parts.size == 2) {
+                        val key = parts[0].trim().lowercase().removeSurrounding("\"").removeSurrounding("'")
+                        val value = parts[1].trim().removeSurrounding("\"").removeSurrounding("'")
+                        currentMap[key] = value
+                    }
+                }
+            }
+            flushCurrent()
+        } catch (_: Exception) {}
+        return servers
+    }
+
+    fun isHtmlOrErrorBody(content: String): Boolean {
+        val trimmed = content.trim()
+        if (trimmed.startsWith("{") || trimmed.startsWith("[")) return false
+        val lower = trimmed.lowercase()
+        return lower.contains("<html") || lower.contains("<!doctype html") ||
+                lower.contains("приложение не поддерживается") || lower.contains("app is not supported")
     }
 
     fun parseJsonConfig(content: String, subscriptionId: String, defaultGroup: String): List<VpnServer> {
@@ -553,16 +662,25 @@ object ProtocolParser {
     }
 
     fun decodeBase64Safe(input: String): String {
+        val clean = input.trim().removePrefix("\uFEFF").replace("\r", "").replace("\n", "").replace(" ", "")
+        if (clean.isEmpty()) return input
+
+        var normalized = clean.replace("-", "+").replace("_", "/")
+        val padRemainder = normalized.length % 4
+        if (padRemainder > 0) {
+            normalized += "=".repeat(4 - padRemainder)
+        }
+
         return try {
-            val clean = input.trim().replace("\r", "").replace("\n", "").replace(" ", "")
-            var padded = clean
-            while (padded.length % 4 != 0) {
-                padded += "="
+            val bytes = Base64.decode(normalized, Base64.DEFAULT)
+            String(bytes, StandardCharsets.UTF_8)
+        } catch (_: Exception) {
+            try {
+                val bytes = Base64.decode(clean, Base64.URL_SAFE)
+                String(bytes, StandardCharsets.UTF_8)
+            } catch (_: Exception) {
+                input
             }
-            val decodedBytes = Base64.decode(padded, Base64.DEFAULT or Base64.NO_WRAP or Base64.URL_SAFE)
-            String(decodedBytes, StandardCharsets.UTF_8)
-        } catch (e: Exception) {
-            input
         }
     }
 
