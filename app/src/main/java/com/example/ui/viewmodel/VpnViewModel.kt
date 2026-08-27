@@ -1,0 +1,221 @@
+package com.example.ui.viewmodel
+
+import android.app.Application
+import android.content.Context
+import android.content.Intent
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import com.example.data.model.AppRule
+import com.example.data.model.Subscription
+import com.example.data.model.VpnServer
+import com.example.data.repository.VpnRepository
+import com.example.vpn.XrayVpnService
+import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.launch
+
+class VpnViewModel(application: Application) : AndroidViewModel(application) {
+
+    private val repository = VpnRepository(application)
+    private val prefs = application.getSharedPreferences("xray_vpn_prefs", Context.MODE_PRIVATE)
+
+    // Room Flows
+    val servers: StateFlow<List<VpnServer>> = repository.allServers
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val subscriptions: StateFlow<List<Subscription>> = repository.allSubscriptions
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val appRules: StateFlow<List<AppRule>> = repository.allAppRules
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    // Selected Server State
+    private val _selectedServerId = MutableStateFlow(prefs.getString("selected_server_id", null))
+    val selectedServerId: StateFlow<String?> = _selectedServerId.asStateFlow()
+
+    val selectedServer: StateFlow<VpnServer?> = combine(servers, selectedServerId) { serverList, id ->
+        serverList.find { it.id == id } ?: serverList.firstOrNull()
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+
+    // Ping Testing States
+    private val _isPinging = MutableStateFlow(false)
+    val isPinging: StateFlow<Boolean> = _isPinging.asStateFlow()
+
+    private val _pingProgress = MutableStateFlow(Pair(0, 0))
+    val pingProgress: StateFlow<Pair<Int, Int>> = _pingProgress.asStateFlow()
+
+    private val _activePingGroup = MutableStateFlow<String?>(null)
+    val activePingGroup: StateFlow<String?> = _activePingGroup.asStateFlow()
+
+    // Subscriptions Action State
+    private val _subStateMessage = MutableStateFlow<String?>(null)
+    val subStateMessage: StateFlow<String?> = _subStateMessage.asStateFlow()
+
+    private val _isSubLoading = MutableStateFlow(false)
+    val isSubLoading: StateFlow<Boolean> = _isSubLoading.asStateFlow()
+
+    // Split Tunneling States
+    private val _splitTunnelEnabled = MutableStateFlow(prefs.getBoolean("split_tunnel_enabled", false))
+    val splitTunnelEnabled: StateFlow<Boolean> = _splitTunnelEnabled.asStateFlow()
+
+    private val _splitTunnelMode = MutableStateFlow(prefs.getString("split_tunnel_mode", "PROXY") ?: "PROXY")
+    val splitTunnelMode: StateFlow<String> = _splitTunnelMode.asStateFlow() // "PROXY" or "BYPASS"
+
+    // VPN Service State Flows
+    val vpnState = XrayVpnService.vpnState
+    val rxBytes = XrayVpnService.rxBytes
+    val txBytes = XrayVpnService.txBytes
+
+    init {
+        viewModelScope.launch {
+            repository.loadSampleData()
+            repository.syncAppRules()
+        }
+    }
+
+    fun selectServer(serverId: String) {
+        _selectedServerId.value = serverId
+        prefs.edit().putString("selected_server_id", serverId).apply()
+    }
+
+    fun togglePin(server: VpnServer) {
+        viewModelScope.launch {
+            repository.togglePin(server.id, !server.isPinned)
+        }
+    }
+
+    fun deleteServer(serverId: String) {
+        viewModelScope.launch {
+            repository.deleteServer(serverId)
+        }
+    }
+
+    fun addServerManually(rawLink: String, groupName: String = "Manual", onSuccess: () -> Unit, onError: (String) -> Unit) {
+        viewModelScope.launch {
+            val success = repository.addServerManually(rawLink, groupName)
+            if (success) onSuccess() else onError("Invalid VLESS or VMess link format.")
+        }
+    }
+
+    fun pingSingleServer(server: VpnServer) {
+        viewModelScope.launch {
+            repository.pingServer(server)
+        }
+    }
+
+    fun pingAllServers() {
+        if (_isPinging.value) return
+        viewModelScope.launch {
+            _isPinging.value = true
+            _activePingGroup.value = "ALL"
+            val targetList = servers.value
+            _pingProgress.value = Pair(0, targetList.size)
+
+            repository.pingServers(targetList) { completed, total ->
+                _pingProgress.value = Pair(completed, total)
+            }
+
+            _isPinging.value = false
+            _activePingGroup.value = null
+        }
+    }
+
+    fun pingGroupServers(groupName: String) {
+        if (_isPinging.value) return
+        viewModelScope.launch {
+            _isPinging.value = true
+            _activePingGroup.value = groupName
+            val targetList = servers.value.filter { it.groupName == groupName }
+            _pingProgress.value = Pair(0, targetList.size)
+
+            repository.pingServers(targetList) { completed, total ->
+                _pingProgress.value = Pair(completed, total)
+            }
+
+            _isPinging.value = false
+            _activePingGroup.value = null
+        }
+    }
+
+    fun addSubscription(url: String, name: String = "") {
+        viewModelScope.launch {
+            _isSubLoading.value = true
+            _subStateMessage.value = "Updating subscription..."
+            val result = repository.addSubscription(url, name)
+            _isSubLoading.value = false
+            result.onSuccess {
+                _subStateMessage.value = "Subscription updated successfully (${it.serverCount} servers)."
+            }.onFailure { err ->
+                _subStateMessage.value = "Error: ${err.localizedMessage ?: "Failed to fetch subscription"}"
+            }
+        }
+    }
+
+    fun updateSubscription(subId: String) {
+        viewModelScope.launch {
+            _isSubLoading.value = true
+            _subStateMessage.value = "Updating subscription..."
+            val result = repository.updateSubscription(subId)
+            _isSubLoading.value = false
+            result.onSuccess {
+                _subStateMessage.value = "Subscription updated (${it.serverCount} servers)."
+            }.onFailure { err ->
+                _subStateMessage.value = "Failed: ${err.localizedMessage}"
+            }
+        }
+    }
+
+    fun deleteSubscription(subId: String) {
+        viewModelScope.launch {
+            repository.deleteSubscription(subId)
+        }
+    }
+
+    fun clearSubStateMessage() {
+        _subStateMessage.value = null
+    }
+
+    fun setSplitTunnelEnabled(enabled: Boolean) {
+        _splitTunnelEnabled.value = enabled
+        prefs.edit().putBoolean("split_tunnel_enabled", enabled).apply()
+    }
+
+    fun setSplitTunnelMode(mode: String) { // "PROXY" or "BYPASS"
+        _splitTunnelMode.value = mode
+        prefs.edit().putString("split_tunnel_mode", mode).apply()
+    }
+
+    fun toggleAppProxied(packageName: String, isProxied: Boolean) {
+        viewModelScope.launch {
+            repository.updateAppRule(packageName, isProxied)
+        }
+    }
+
+    fun setAllAppsProxied(isProxied: Boolean) {
+        viewModelScope.launch {
+            repository.setAllAppRulesProxied(isProxied)
+        }
+    }
+
+    fun toggleVpnConnection(context: Context) {
+        val currentState = vpnState.value
+        val server = selectedServer.value ?: return
+
+        val intent = Intent(context, XrayVpnService::class.java)
+        if (currentState == XrayVpnService.State.CONNECTED || currentState == XrayVpnService.State.CONNECTING) {
+            intent.action = XrayVpnService.ACTION_DISCONNECT
+        } else {
+            intent.action = XrayVpnService.ACTION_CONNECT
+            intent.putExtra(XrayVpnService.EXTRA_SERVER_ID, server.id)
+            intent.putExtra(XrayVpnService.EXTRA_SERVER_NAME, server.name)
+            intent.putExtra(XrayVpnService.EXTRA_SERVER_HOST, server.host)
+            intent.putExtra(XrayVpnService.EXTRA_SPLIT_TUNNEL_ENABLED, _splitTunnelEnabled.value)
+            intent.putExtra(XrayVpnService.EXTRA_SPLIT_MODE, _splitTunnelMode.value)
+        }
+
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            context.startForegroundService(intent)
+        } else {
+            context.startService(intent)
+        }
+    }
+}
