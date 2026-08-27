@@ -3,6 +3,6 @@
     <item
         android:width="66dp"
         android:height="66dp"
-        android:drawable="@drawable/ic_vpn_logo"
+        android:drawable="@drawable/xray_flow_icon_1787845544893"
         android:gravity="center" />
 </layer-list>

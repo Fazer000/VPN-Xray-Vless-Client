@@ -20,6 +20,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "Xray VPN"
+rootProject.name = "Xray flow"
 
 include(":app")
