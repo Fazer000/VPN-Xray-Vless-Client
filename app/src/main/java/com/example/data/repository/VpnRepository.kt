@@ -54,20 +54,11 @@ class VpnRepository(private val context: Context) {
     }
 
     suspend fun loadSampleData() = withContext(Dispatchers.IO) {
-        val existingServers = allServers.first()
-        if (existingServers.isEmpty()) {
-            val samples = ProtocolParser.getSampleServers()
-            serverDao.insertServers(samples)
-
-            val sampleSub = Subscription(
-                id = "sample_sub",
-                name = "V2RayTun Demo Subscription",
-                url = "https://raw.githubusercontent.com/v2fly/fakedata/main/sub.txt",
-                lastUpdated = System.currentTimeMillis(),
-                serverCount = samples.size
-            )
-            subDao.insertSubscription(sampleSub)
-        }
+        // Clean up any previously inserted demo/sample subscriptions or servers
+        try {
+            serverDao.deleteServersBySubscription("sample_sub")
+            subDao.deleteSubscriptionById("sample_sub")
+        } catch (_: Exception) {}
     }
 
     suspend fun addSubscription(url: String, customName: String = "", customUserAgent: String = ""): Result<Subscription> = withContext(Dispatchers.IO) {

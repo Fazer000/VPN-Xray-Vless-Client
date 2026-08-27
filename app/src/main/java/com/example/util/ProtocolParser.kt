@@ -567,16 +567,7 @@ object ProtocolParser {
     }
 
     fun getSampleServers(): List<VpnServer> {
-        val samples = listOf(
-            "vless://93a4a0c8-2e02-4c28-bf3a-9e22e8d350b2@de-frankfurt.v2ray.net:443?type=ws&security=tls&path=%2Fvless-ws&sni=de-frankfurt.v2ray.net#🇩🇪 DE Frankfurt VLESS-WS",
-            "vless://a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d@nl-amsterdam.v2ray.net:443?type=grpc&security=reality&sni=nl-amsterdam.v2ray.net#🇳🇱 NL Amsterdam Reality",
-            "vless://11223344-5566-7788-9900-aabbccddeeff@us-east.v2ray.net:443?type=ws&security=tls&path=%2Ffast-route&sni=us-east.v2ray.net#🇺🇸 US Virginia HighSpeed",
-            "vmess://ewogICJ2IjogIjIiLAogICJwcyI6ICLskpAganAgVG9reW8gVk1lc3MiLAogICJhZGQiOiAianAtdG9reW8udjJyYXkubmV0IiwKICAicG9ydCI6IDQ0MywKICAiaWQiOiAiOTNhNGEwYzgtMmUwMi00YzI4LWJmM2EtOWUyMmU4ZDM1MGIyIiwKICAiYWlkIjogMCwKICAibmV0IjogIndzIiwKICAidHlwZSI6ICJub25lIiwKICAiaG9zdCI6ICJqcC10b2t5by52MnJheS5uZXQiLAogICJwYXRoIjogIi92bWVzcyIsCiAgInRscyI6ICJ0bHMiLAogICJzbmkiOiAianAtdG9reW8udjJyYXkubmV0Igp9",
-            "trojan://password123@de-trojan.v2ray.net:443?security=tls&type=ws&path=%2Ftrojan#🇩🇪 DE Trojan Secure",
-            "vless://44556677-8899-0011-2233-445566778899@fi-helsinki.v2ray.net:8443?type=ws&security=tls&path=%2Ffi-node#🇫🇮 FI Helsinki Turbo"
-        )
-
-        return samples.mapNotNull { parseLink(it, "sample_sub", "Sample V2Ray Group") }
+        return emptyList()
     }
 }
 

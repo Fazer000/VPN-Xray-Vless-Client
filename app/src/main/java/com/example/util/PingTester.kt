@@ -16,19 +16,19 @@ object PingTester {
      */
     suspend fun testPing(server: VpnServer, timeoutMs: Int = 3000): Long = withContext(Dispatchers.IO) {
         val startTime = System.currentTimeMillis()
-        var socket: Socket? = null
         try {
-            socket = Socket()
-            val socketAddress = InetSocketAddress(server.host, server.port)
-            socket.connect(socketAddress, timeoutMs)
-            val endTime = System.currentTimeMillis()
-            (endTime - startTime)
+            kotlinx.coroutines.withTimeoutOrNull(timeoutMs.toLong()) {
+                val address = java.net.InetAddress.getByName(server.host)
+                val socketAddress = java.net.InetSocketAddress(address, server.port)
+                java.net.Socket().use { socket ->
+                    socket.connect(socketAddress, timeoutMs)
+                }
+                val endTime = System.currentTimeMillis()
+                val delta = endTime - startTime
+                if (delta <= 0) 1L else delta
+            } ?: -2L
         } catch (e: Exception) {
             -2L
-        } finally {
-            try {
-                socket?.close()
-            } catch (_: Exception) {}
         }
     }
 
