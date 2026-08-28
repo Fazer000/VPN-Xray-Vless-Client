@@ -6,6 +6,8 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.Network
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
@@ -181,13 +183,31 @@ class XrayVpnService : VpnService() {
         connectionJob = serviceScope.launch {
             try {
                 LogManager.i("TUN", "Building TUN interface (IP: 10.0.0.2/24, MTU: 1400, DNS: 1.1.1.1, 8.8.8.8, 9.9.9.9)")
+
+                val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+                val activeNetwork = cm?.activeNetwork
+                if (activeNetwork != null) {
+                    try {
+                        setUnderlyingNetworks(arrayOf<Network>(activeNetwork))
+                    } catch (e: Exception) {
+                        LogManager.w("TUN", "setUnderlyingNetworks error: ${e.message}")
+                    }
+                } else {
+                    try {
+                        setUnderlyingNetworks(null)
+                    } catch (_: Exception) {}
+                }
+
                 val builder = Builder()
                     .setSession(serverName)
                     .addAddress("10.0.0.2", 24)
                     .addRoute("0.0.0.0", 0)
+                    .addAddress("fd00:1:2::2", 128)
+                    .addRoute("::", 0)
                     .addDnsServer("1.1.1.1")
                     .addDnsServer("8.8.8.8")
                     .addDnsServer("9.9.9.9")
+                    .addDnsServer("2606:4700:4700::1111")
                     .setMtu(1400)
 
                 // Apply Per-App Split Tunneling rules
@@ -392,6 +412,10 @@ class XrayVpnService : VpnService() {
                     addTxBytes(length.toLong())
 
                     val ipVersion = (buffer[0].toInt() and 0xF0) shr 4
+                    if (ipVersion == 6) {
+                        handleIpv6TcpPacket(buffer, length, output)
+                        continue
+                    }
                     if (ipVersion != 4 || length < 20) continue
 
                     val headerLength = (buffer[0].toInt() and 0x0F) * 4
@@ -628,6 +652,115 @@ class XrayVpnService : VpnService() {
 
     private val dnsCache = java.util.concurrent.ConcurrentHashMap<String, ByteArray>()
 
+    private fun protectSocket(socket: Socket) {
+        val isProtected = protect(socket)
+        if (!isProtected) {
+            LogManager.w("XrayVpnService", "protect(socket) returned false!")
+        }
+        try {
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+            val activeNetwork = cm?.activeNetwork
+            activeNetwork?.bindSocket(socket)
+        } catch (e: Exception) {
+            LogManager.d("XrayVpnService", "activeNetwork.bindSocket error: ${e.message}")
+        }
+    }
+
+    private fun resolveServerAddress(serverHost: String, serverPort: Int): InetSocketAddress {
+        return try {
+            val addresses = InetAddress.getAllByName(serverHost)
+            // Explicitly prefer IPv4 for the VLESS proxy connection to avoid broken IPv6 routes on mobile APNs
+            val ipv4 = addresses.firstOrNull { it is java.net.Inet4Address }
+            if (ipv4 != null) {
+                InetSocketAddress(ipv4, serverPort)
+            } else {
+                InetSocketAddress(addresses.first(), serverPort)
+            }
+        } catch (e: Exception) {
+            InetSocketAddress(serverHost, serverPort)
+        }
+    }
+
+    private fun handleIpv6TcpPacket(buffer: ByteArray, length: Int, output: FileOutputStream) {
+        try {
+            if (length < 60) return
+            val nextHeader = buffer[6].toInt() and 0xFF
+            if (nextHeader != 6) return // TCP only
+
+            val srcIp = ByteArray(16)
+            val dstIp = ByteArray(16)
+            System.arraycopy(buffer, 8, srcIp, 0, 16)
+            System.arraycopy(buffer, 24, dstIp, 0, 16)
+
+            val srcPort = ((buffer[40].toInt() and 0xFF) shl 8) or (buffer[41].toInt() and 0xFF)
+            val dstPort = ((buffer[42].toInt() and 0xFF) shl 8) or (buffer[43].toInt() and 0xFF)
+
+            val seqVal = ((buffer[44].toLong() and 0xFF) shl 24) or
+                    ((buffer[45].toLong() and 0xFF) shl 16) or
+                    ((buffer[46].toLong() and 0xFF) shl 8) or
+                    (buffer[47].toLong() and 0xFF)
+            val ackVal = ((buffer[48].toLong() and 0xFF) shl 24) or
+                    ((buffer[49].toLong() and 0xFF) shl 16) or
+                    ((buffer[50].toLong() and 0xFF) shl 8) or
+                    (buffer[51].toLong() and 0xFF)
+
+            val flags = buffer[53].toInt() and 0xFF
+            val isRst = (flags and 0x04) != 0
+            if (isRst) return
+
+            sendIpv6TcpRstPacket(output, dstIp, srcIp, dstPort, srcPort, ackVal, (seqVal + 1) and 0xFFFFFFFFL)
+        } catch (e: Exception) {
+            LogManager.d("IPv6", "IPv6 TCP RST handle error: ${e.message}")
+        }
+    }
+
+    private fun sendIpv6TcpRstPacket(
+        output: FileOutputStream,
+        srcIp: ByteArray,
+        dstIp: ByteArray,
+        srcPort: Int,
+        dstPort: Int,
+        seq: Long,
+        ack: Long
+    ) {
+        try {
+            val ipv6Rst = ByteArray(60)
+            ipv6Rst[0] = 0x60
+            ipv6Rst[1] = 0x00
+            ipv6Rst[2] = 0x00
+            ipv6Rst[3] = 0x00
+            ipv6Rst[4] = 0x00
+            ipv6Rst[5] = 0x14 // Payload len 20
+            ipv6Rst[6] = 6    // TCP
+            ipv6Rst[7] = 64   // Hop limit
+            System.arraycopy(srcIp, 0, ipv6Rst, 8, 16)
+            System.arraycopy(dstIp, 0, ipv6Rst, 24, 16)
+
+            ipv6Rst[40] = ((srcPort ushr 8) and 0xFF).toByte()
+            ipv6Rst[41] = (srcPort and 0xFF).toByte()
+            ipv6Rst[42] = ((dstPort ushr 8) and 0xFF).toByte()
+            ipv6Rst[43] = (dstPort and 0xFF).toByte()
+
+            ipv6Rst[44] = ((seq ushr 24) and 0xFF).toByte()
+            ipv6Rst[45] = ((seq ushr 16) and 0xFF).toByte()
+            ipv6Rst[46] = ((seq ushr 8) and 0xFF).toByte()
+            ipv6Rst[47] = (seq and 0xFF).toByte()
+
+            ipv6Rst[48] = ((ack ushr 24) and 0xFF).toByte()
+            ipv6Rst[49] = ((ack ushr 16) and 0xFF).toByte()
+            ipv6Rst[50] = ((ack ushr 8) and 0xFF).toByte()
+            ipv6Rst[51] = (ack and 0xFF).toByte()
+
+            ipv6Rst[52] = 0x50 // Data offset 20
+            ipv6Rst[53] = 0x14 // RST + ACK
+            ipv6Rst[54] = 0x00
+            ipv6Rst[55] = 0x00
+
+            output.write(ipv6Rst)
+            output.flush()
+        } catch (_: Exception) {}
+    }
+
     private fun connectProxySocket(
         serverHost: String,
         serverPort: Int,
@@ -650,11 +783,10 @@ class XrayVpnService : VpnService() {
 
     private fun establishDirectConnection(targetHost: String, targetPort: Int): Socket {
         val socket = Socket()
-        protect(socket)
+        protectSocket(socket)
         socket.tcpNoDelay = true
         socket.keepAlive = true
-        val targetAddr = InetAddress.getByName(targetHost)
-        socket.connect(InetSocketAddress(targetAddr, targetPort), 5000)
+        socket.connect(resolveServerAddress(targetHost, targetPort), 5000)
         return socket
     }
 
@@ -670,10 +802,10 @@ class XrayVpnService : VpnService() {
         targetPort: Int
     ): Socket {
         val rawSocket = Socket()
-        protect(rawSocket)
+        protectSocket(rawSocket)
         rawSocket.tcpNoDelay = true
         rawSocket.keepAlive = true
-        rawSocket.connect(InetSocketAddress(serverHost, serverPort), 7000)
+        rawSocket.connect(resolveServerAddress(serverHost, serverPort), 7000)
 
         val tlsSocket = if (serverSecurity.equals("tls", ignoreCase = true) || serverSecurity.equals("reality", ignoreCase = true) || serverPort == 443) {
             createTlsSocket(rawSocket, serverHost, serverPort, serverSni)
@@ -715,10 +847,10 @@ class XrayVpnService : VpnService() {
         targetPort: Int
     ): Socket {
         val rawSocket = Socket()
-        protect(rawSocket)
+        protectSocket(rawSocket)
         rawSocket.tcpNoDelay = true
         rawSocket.keepAlive = true
-        rawSocket.connect(InetSocketAddress(serverHost, serverPort), 7000)
+        rawSocket.connect(resolveServerAddress(serverHost, serverPort), 7000)
 
         val tlsSocket = if (serverSecurity.equals("none", ignoreCase = true)) {
             rawSocket
@@ -772,9 +904,9 @@ class XrayVpnService : VpnService() {
         targetPort: Int
     ): Socket {
         val socket = Socket()
-        protect(socket)
+        protectSocket(socket)
         socket.tcpNoDelay = true
-        socket.connect(InetSocketAddress(serverHost, serverPort), 7000)
+        socket.connect(resolveServerAddress(serverHost, serverPort), 7000)
 
         val out = socket.getOutputStream()
         val input = socket.getInputStream()
@@ -1345,10 +1477,10 @@ class XrayVpnService : VpnService() {
             try {
                 val dstHostStr = try { InetAddress.getByAddress(serverIp).hostAddress ?: "127.0.0.1" } catch (_: Exception) { "127.0.0.1" }
                 val rawSocket = Socket()
-                protect(rawSocket)
+                protectSocket(rawSocket)
                 rawSocket.tcpNoDelay = true
                 rawSocket.soTimeout = 4000
-                rawSocket.connect(InetSocketAddress(serverHost, serverPortConfig), 5000)
+                rawSocket.connect(resolveServerAddress(serverHost, serverPortConfig), 5000)
 
                 val tlsSocket = if (serverSecurity.equals("tls", ignoreCase = true) || serverSecurity.equals("reality", ignoreCase = true) || serverPortConfig == 443) {
                     createTlsSocket(rawSocket, serverHost, serverPortConfig, serverSni)
