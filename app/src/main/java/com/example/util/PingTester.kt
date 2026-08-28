@@ -92,10 +92,37 @@ object PingTester {
             if (server.network.equals("ws", ignoreCase = true)) {
                 sslSocket.startHandshake()
                 probeWebSocket(sslSocket, server, timeoutMs)
+            } else if (server.network.equals("xhttp", ignoreCase = true) || server.network.equals("splithttp", ignoreCase = true) || server.network.equals("http", ignoreCase = true) || server.network.equals("h2", ignoreCase = true) || server.network.equals("grpc", ignoreCase = true)) {
+                sslSocket.startHandshake()
+                probeHttp(sslSocket, server, timeoutMs)
             } else {
                 sslSocket.startHandshake()
                 true
             }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun probeHttp(socket: Socket, server: VpnServer, timeoutMs: Int): Boolean {
+        return try {
+            val path = if (server.path.isNotEmpty()) server.path else "/"
+            val sni = if (server.sni.isNotEmpty()) server.sni else server.host
+            val req = "POST $path HTTP/1.1\r\nHost: $sni\r\nUser-Agent: Mozilla/5.0\r\nContent-Type: application/octet-stream\r\nConnection: keep-alive\r\n\r\n"
+
+            val out = socket.getOutputStream()
+            val input = socket.getInputStream()
+            socket.soTimeout = timeoutMs
+
+            out.write(req.toByteArray(Charsets.UTF_8))
+            out.flush()
+
+            val respBuf = ByteArray(256)
+            val bytesRead = input.read(respBuf)
+            if (bytesRead > 0) {
+                val respStr = String(respBuf, 0, bytesRead, Charsets.UTF_8)
+                respStr.startsWith("HTTP/")
+            } else false
         } catch (_: Exception) {
             false
         }
