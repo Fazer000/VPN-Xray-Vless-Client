@@ -898,8 +898,8 @@ class XrayVpnService : VpnService() {
             performWsUpgrade(socket, serverHost, serverPath, serverSni)
             WebSocketStreamSocket(socket)
         } else if (serverNetwork.equals("xhttp", ignoreCase = true) || serverNetwork.equals("splithttp", ignoreCase = true) || serverNetwork.equals("http", ignoreCase = true) || serverNetwork.equals("h2", ignoreCase = true) || serverNetwork.equals("grpc", ignoreCase = true)) {
-            val isChunked = performHttpUpgrade(socket, serverHost, serverPath, serverSni)
-            HttpStreamSocket(socket, isChunked)
+            performHttpUpgrade(socket, serverHost, serverPath, serverSni)
+            socket
         } else {
             socket
         }
@@ -1168,7 +1168,7 @@ class XrayVpnService : VpnService() {
         return bos.toString("UTF-8")
     }
 
-    private fun performHttpUpgrade(socket: Socket, host: String, path: String, sni: String): Boolean {
+    private fun performHttpUpgrade(socket: Socket, host: String, path: String, sni: String) {
         try {
             val cleanPath = try { java.net.URLDecoder.decode(path, "UTF-8") } catch (_: Exception) { path }
             val httpPath = if (cleanPath.startsWith("/")) cleanPath else "/$cleanPath"
@@ -1181,13 +1181,8 @@ class XrayVpnService : VpnService() {
                     "Connection: keep-alive\r\n\r\n"
             socket.getOutputStream().write(req.toByteArray(Charsets.UTF_8))
             socket.getOutputStream().flush()
-
-            val headerStr = readHttpResponseHeader(socket.getInputStream())
-            LogManager.d("XrayVpnService", "HTTP Upgrade response header received: ${headerStr.lines().firstOrNull()}")
-            return headerStr.lowercase().contains("chunked")
         } catch (e: Exception) {
             LogManager.w("XrayVpnService", "HTTP upgrade write error: ${e.message}")
-            return false
         }
     }
 
@@ -1682,8 +1677,8 @@ class XrayVpnService : VpnService() {
                     performWsUpgrade(socket, serverHost, serverPath, serverSni)
                     WebSocketStreamSocket(socket)
                 } else if (serverNetwork.equals("xhttp", ignoreCase = true) || serverNetwork.equals("splithttp", ignoreCase = true) || serverNetwork.equals("http", ignoreCase = true) || serverNetwork.equals("h2", ignoreCase = true) || serverNetwork.equals("grpc", ignoreCase = true)) {
-                    val isChunked = performHttpUpgrade(socket, serverHost, serverPath, serverSni)
-                    HttpStreamSocket(socket, isChunked)
+                    performHttpUpgrade(socket, serverHost, serverPath, serverSni)
+                    socket
                 } else {
                     socket
                 }
@@ -1840,72 +1835,6 @@ class VlessInputStream(private val delegateIn: InputStream) : InputStream() {
             }
         }
         return delegateIn.read(b, off, len)
-    }
-}
-
-class HttpStreamSocket(private val delegate: Socket, isChunked: Boolean) : Socket() {
-    private val inStream = if (isChunked) HttpChunkedInputStream(delegate.getInputStream()) else delegate.getInputStream()
-
-    override fun getInputStream(): InputStream = inStream
-    override fun getOutputStream(): OutputStream = delegate.getOutputStream()
-    override fun isConnected(): Boolean = delegate.isConnected
-    override fun isClosed(): Boolean = delegate.isClosed
-    override fun close() {
-        try { delegate.close() } catch (_: Exception) {}
-    }
-}
-
-class HttpChunkedInputStream(private val delegateIn: InputStream) : InputStream() {
-    private var currentChunkRemaining = 0
-    private var eof = false
-
-    override fun read(): Int {
-        val b = ByteArray(1)
-        val r = read(b, 0, 1)
-        return if (r > 0) b[0].toInt() and 0xFF else -1
-    }
-
-    override fun read(b: ByteArray, off: Int, len: Int): Int {
-        if (len <= 0 || eof) return if (eof) -1 else 0
-        if (currentChunkRemaining <= 0) {
-            if (!readNextChunkHeader()) {
-                eof = true
-                return -1
-            }
-        }
-        val toRead = Math.min(len, currentChunkRemaining)
-        val read = delegateIn.read(b, off, toRead)
-        if (read <= 0) {
-            eof = true
-            return -1
-        }
-        currentChunkRemaining -= read
-        if (currentChunkRemaining == 0) {
-            try {
-                delegateIn.read() // \r
-                delegateIn.read() // \n
-            } catch (_: Exception) {}
-        }
-        return read
-    }
-
-    private fun readNextChunkHeader(): Boolean {
-        val lineBos = ByteArrayOutputStream()
-        while (true) {
-            val b = delegateIn.read()
-            if (b == -1) return false
-            if (b == 10) break
-            if (b != 13) lineBos.write(b)
-        }
-        val line = lineBos.toString("UTF-8").trim()
-        val hexStr = line.split(";").firstOrNull()?.trim() ?: return false
-        return try {
-            val size = hexStr.toInt(16)
-            currentChunkRemaining = size
-            size > 0
-        } catch (_: Exception) {
-            false
-        }
     }
 }
 
