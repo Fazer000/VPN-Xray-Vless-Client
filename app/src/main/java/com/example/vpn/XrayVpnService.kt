@@ -830,6 +830,7 @@ class XrayVpnService : VpnService() {
         return when (serverProtocol.uppercase()) {
             "TROJAN" -> establishTrojanConnection(serverHost, serverPort, serverUuid, serverSecurity, serverNetwork, serverPath, serverSni, targetHost, targetPort)
             "SOCKS", "SOCKS5" -> establishSocks5Connection(serverHost, serverPort, serverUuid, targetHost, targetPort)
+            "VMESS" -> establishVmessConnection(serverHost, serverPort, serverUuid, serverSecurity, serverNetwork, serverPath, serverSni, targetHost, targetPort)
             else -> establishVlessConnection(
                 serverHost, serverPort, serverUuid, serverSecurity, serverNetwork, serverPath, serverSni,
                 serverPublicKey, serverShortId, serverFingerprint, serverFlow, serverServiceName, serverAlpn,
@@ -870,16 +871,23 @@ class XrayVpnService : VpnService() {
         rawSocket.keepAlive = true
         rawSocket.connect(resolveServerAddress(serverHost, serverPort), 7000)
 
-        val socket = if (serverSecurity.equals("reality", ignoreCase = true) && serverPublicKey.isNotEmpty()) {
-            val pbkBytes = RealityHelper.parseHexOrBase64(serverPublicKey)
-            val sidBytes = RealityHelper.parseHexOrBase64(serverShortId)
-            val (clientHelloPacket, _) = RealityHelper.buildClientHello(serverSni.ifEmpty { serverHost }, pbkBytes, sidBytes, serverAlpn)
-            val out = rawSocket.getOutputStream()
-            out.write(clientHelloPacket)
-            out.flush()
-            rawSocket
-        } else if (serverSecurity.equals("tls", ignoreCase = true) || serverPort == 443) {
-            createTlsSocket(rawSocket, serverHost, serverPort, serverSni, serverAlpn)
+        val socket = if (serverSecurity.equals("reality", ignoreCase = true) || serverSecurity.equals("tls", ignoreCase = true) || serverPort == 443) {
+            try {
+                createTlsSocket(rawSocket, serverHost, serverPort, serverSni, serverAlpn)
+            } catch (e: Exception) {
+                LogManager.w("VLESS", "TLS Handshake failed, attempting raw socket: ${e.message}")
+                if (serverPublicKey.isNotEmpty()) {
+                    try {
+                        val pbkBytes = RealityHelper.parseHexOrBase64(serverPublicKey)
+                        val sidBytes = RealityHelper.parseHexOrBase64(serverShortId)
+                        val (clientHelloPacket, _) = RealityHelper.buildClientHello(serverSni.ifEmpty { serverHost }, pbkBytes, sidBytes, serverAlpn)
+                        val out = rawSocket.getOutputStream()
+                        out.write(clientHelloPacket)
+                        out.flush()
+                    } catch (_: Exception) {}
+                }
+                rawSocket
+            }
         } else {
             rawSocket
         }
@@ -910,6 +918,66 @@ class XrayVpnService : VpnService() {
         out.flush()
 
         return VlessStreamSocket(streamSocket)
+    }
+
+    private fun establishVmessConnection(
+        serverHost: String,
+        serverPort: Int,
+        serverUuid: String,
+        serverSecurity: String,
+        serverNetwork: String,
+        serverPath: String,
+        serverSni: String,
+        targetHost: String,
+        targetPort: Int
+    ): Socket {
+        val rawSocket = Socket()
+        protectSocket(rawSocket)
+        rawSocket.tcpNoDelay = true
+        rawSocket.keepAlive = true
+        rawSocket.connect(resolveServerAddress(serverHost, serverPort), 7000)
+
+        val tlsSocket = if (serverSecurity.equals("tls", ignoreCase = true) || serverPort == 443) {
+            try {
+                createTlsSocket(rawSocket, serverHost, serverPort, serverSni)
+            } catch (e: Exception) {
+                rawSocket
+            }
+        } else {
+            rawSocket
+        }
+
+        val socket = if (serverNetwork.equals("ws", ignoreCase = true)) {
+            performWsUpgrade(tlsSocket, serverHost, serverPath, serverSni)
+            WebSocketStreamSocket(tlsSocket)
+        } else {
+            tlsSocket
+        }
+
+        val out = socket.getOutputStream()
+        val bos = ByteArrayOutputStream()
+
+        bos.write(0x01) // Version 1
+        bos.write(parseUuidToBytes(serverUuid))
+        bos.write(0x01) // Command TCP
+        bos.write((targetPort ushr 8) and 0xFF)
+        bos.write(targetPort and 0xFF)
+
+        val ipBytes = try { InetAddress.getByName(targetHost).address } catch (_: Exception) { null }
+        if (ipBytes != null && ipBytes.size == 4) {
+            bos.write(0x01) // IPv4
+            bos.write(ipBytes)
+        } else {
+            bos.write(0x02) // Domain
+            val domainBytes = targetHost.toByteArray(Charsets.UTF_8)
+            bos.write(domainBytes.size)
+            bos.write(domainBytes)
+        }
+
+        out.write(bos.toByteArray())
+        out.flush()
+
+        return socket
     }
 
     private fun establishTrojanConnection(

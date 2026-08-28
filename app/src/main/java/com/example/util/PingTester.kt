@@ -108,22 +108,27 @@ object PingTester {
             val sni = if (server.sni.isNotEmpty()) server.sni else server.host
             val alpn = if (server.alpn.isNotEmpty()) server.alpn else "h2,http/1.1"
 
-            val (clientHelloPacket, _) = com.example.vpn.RealityHelper.buildClientHello(
-                sni, pbkBytes, sidBytes, alpn
-            )
+            if (pbkBytes.isNotEmpty()) {
+                val (clientHelloPacket, _) = com.example.vpn.RealityHelper.buildClientHello(
+                    sni, pbkBytes, sidBytes, alpn
+                )
 
-            val out = rawSocket.getOutputStream()
-            val input = rawSocket.getInputStream()
-            rawSocket.soTimeout = timeoutMs
+                val out = rawSocket.getOutputStream()
+                val input = rawSocket.getInputStream()
+                rawSocket.soTimeout = timeoutMs
 
-            out.write(clientHelloPacket)
-            out.flush()
+                out.write(clientHelloPacket)
+                out.flush()
 
-            val responseHeader = ByteArray(5)
-            val read = input.read(responseHeader)
-            read >= 5 && (responseHeader[0] == 0x16.toByte() || responseHeader[0] == 0x14.toByte())
+                val responseHeader = ByteArray(5)
+                val read = input.read(responseHeader)
+                if (read >= 5 && (responseHeader[0] == 0x16.toByte() || responseHeader[0] == 0x14.toByte() || responseHeader[0] == 0x17.toByte())) {
+                    return true
+                }
+            }
+            probeTls(rawSocket, server, timeoutMs)
         } catch (_: Exception) {
-            false
+            probeTls(rawSocket, server, timeoutMs)
         }
     }
 
