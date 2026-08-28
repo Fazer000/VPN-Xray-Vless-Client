@@ -437,10 +437,11 @@ fun HomeScreen(
 @Composable
 fun LatencyBadge(latencyMs: Long) {
     val (color, text) = when {
-        latencyMs < 0 -> Pair(TextSecondary, "Untested")
-        latencyMs in 0..120 -> Pair(CyberGreen, "${latencyMs}ms")
-        latencyMs in 121..300 -> Pair(CyberAmber, "${latencyMs}ms")
-        else -> Pair(CyberRed, if (latencyMs == -2L) "Timeout" else "${latencyMs}ms")
+        latencyMs == -1L -> Pair(TextSecondary, "—")
+        latencyMs == -2L || latencyMs > 8000 -> Pair(CyberRed, "Офлайн")
+        latencyMs in 0..150 -> Pair(CyberGreen, "${latencyMs} ms")
+        latencyMs in 151..350 -> Pair(CyberAmber, "${latencyMs} ms")
+        else -> Pair(CyberRed, "${latencyMs} ms")
     }
 
     Surface(

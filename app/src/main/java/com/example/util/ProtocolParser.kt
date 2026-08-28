@@ -290,54 +290,121 @@ object ProtocolParser {
         }
     }
 
+    fun sanitizeAndDeduplicate(servers: List<VpnServer>): List<VpnServer> {
+        val result = mutableListOf<VpnServer>()
+        val seenSignatures = mutableSetOf<String>()
+
+        val infoKeywords = listOf(
+            "истекает", "срок", "баланс", "трафик", "инфо", "подписка", "канал", "сайт",
+            "купить", "поддержка", "renew", "expire", "traffic", "notice", "telegram",
+            "t.me", "http://", "https://", "remaining", "limit", "website", "version",
+            "update", "skachat", "настройка", "инструкция", "support", "buy", "news", "новости"
+        )
+
+        for (server in servers) {
+            val lowerName = server.name.lowercase()
+            val lowerHost = server.host.lowercase()
+            val lowerPath = server.path.lowercase()
+
+            // Skip invalid loopback or invalid port hosts
+            if (lowerHost in listOf("127.0.0.1", "0.0.0.0", "localhost", "::1")) continue
+            if (server.port <= 0 || server.port > 65535) continue
+
+            // Skip info / non-functional notice nodes
+            var isInfoNode = false
+            for (kw in infoKeywords) {
+                if (lowerName.contains(kw) || lowerHost.contains(kw) || lowerPath.contains(kw)) {
+                    isInfoNode = true
+                    break
+                }
+            }
+            if (isInfoNode) continue
+
+            // Clean up name formatting
+            var cleanName = server.name
+                .replace(Regex("\\[(VLESS|VMESS|TROJAN|SS|SOCKS|HY2|HYSTERIA2|V2RAY|XRAY)\\]", RegexOption.IGNORE_CASE), "")
+                .replace(Regex("^\\[.*?\\]"), "")
+                .trim()
+                .removePrefix("-")
+                .removePrefix(":")
+                .trim()
+
+            if (cleanName.isBlank()) {
+                cleanName = "${server.protocol.name} ${server.host}"
+            }
+
+            val group = extractGroupFromName(cleanName, server.groupName)
+            val formattedServer = server.copy(
+                name = cleanName,
+                groupName = group
+            )
+
+            // Deduplicate by unique server configuration signature
+            val sig = "${formattedServer.protocol}_${formattedServer.host.lowercase()}_${formattedServer.port}_${formattedServer.uuid}_${formattedServer.security}_${formattedServer.network}_${formattedServer.path}_${formattedServer.sni}_${formattedServer.publicKey}"
+            if (seenSignatures.add(sig)) {
+                result.add(formattedServer)
+            }
+        }
+        return result
+    }
+
     fun parseSubscriptionContent(content: String, subscriptionId: String, groupName: String): List<VpnServer> {
         val cleanContent = content.trim().removePrefix("\uFEFF")
         if (cleanContent.isEmpty()) return emptyList()
 
+        val parsedRaw = mutableListOf<VpnServer>()
+
         // 1. Direct JSON (Sing-box / Xray / V2Ray)
         val jsonServers = parseJsonConfig(cleanContent, subscriptionId, groupName)
-        if (jsonServers.isNotEmpty()) return jsonServers
-
-        // 2. Base64 decoded content
-        val decoded = decodeBase64Safe(cleanContent)
-        if (decoded != cleanContent && decoded.isNotBlank()) {
-            val decodedJson = parseJsonConfig(decoded, subscriptionId, groupName)
-            if (decodedJson.isNotEmpty()) return decodedJson
-        }
-
-        // 3. Clash YAML format
-        if (cleanContent.contains("proxies:") || decoded.contains("proxies:")) {
-            val yamlServers = parseClashYaml(cleanContent, subscriptionId, groupName).ifEmpty {
-                parseClashYaml(decoded, subscriptionId, groupName)
-            }
-            if (yamlServers.isNotEmpty()) return yamlServers
-        }
-
-        // 4. Line-by-line URI parsing (checking both decoded base64 and original content)
-        val candidates = listOf(decoded, cleanContent)
-        val servers = mutableListOf<VpnServer>()
-        val seenIds = mutableSetOf<String>()
-
-        for (candidate in candidates) {
-            candidate.lines().forEach { line ->
-                val trimmedLine = line.trim()
-                if (trimmedLine.isNotEmpty() && !trimmedLine.startsWith("#")) {
-                    var server = parseLink(trimmedLine, subscriptionId, groupName)
-                    if (server == null && trimmedLine.length > 25 && !trimmedLine.contains("://")) {
-                        val decodedLine = decodeBase64Safe(trimmedLine)
-                        if (decodedLine != trimmedLine) {
-                            server = parseLink(decodedLine, subscriptionId, groupName)
-                        }
-                    }
-                    if (server != null && seenIds.add(server.id)) {
-                        servers.add(server)
-                    }
+        if (jsonServers.isNotEmpty()) {
+            parsedRaw.addAll(jsonServers)
+        } else {
+            // 2. Base64 decoded content
+            val decoded = decodeBase64Safe(cleanContent)
+            if (decoded != cleanContent && decoded.isNotBlank()) {
+                val decodedJson = parseJsonConfig(decoded, subscriptionId, groupName)
+                if (decodedJson.isNotEmpty()) {
+                    parsedRaw.addAll(decodedJson)
                 }
             }
-            if (servers.isNotEmpty()) break
+
+            // 3. Clash YAML format
+            if (parsedRaw.isEmpty() && (cleanContent.contains("proxies:") || decoded.contains("proxies:"))) {
+                val yamlServers = parseClashYaml(cleanContent, subscriptionId, groupName).ifEmpty {
+                    parseClashYaml(decoded, subscriptionId, groupName)
+                }
+                if (yamlServers.isNotEmpty()) {
+                    parsedRaw.addAll(yamlServers)
+                }
+            }
+
+            // 4. Line-by-line URI parsing
+            if (parsedRaw.isEmpty()) {
+                val candidates = listOf(decoded, cleanContent)
+                val seenIds = mutableSetOf<String>()
+
+                for (candidate in candidates) {
+                    candidate.lines().forEach { line ->
+                        val trimmedLine = line.trim()
+                        if (trimmedLine.isNotEmpty() && !trimmedLine.startsWith("#")) {
+                            var server = parseLink(trimmedLine, subscriptionId, groupName)
+                            if (server == null && trimmedLine.length > 25 && !trimmedLine.contains("://")) {
+                                val decodedLine = decodeBase64Safe(trimmedLine)
+                                if (decodedLine != trimmedLine) {
+                                    server = parseLink(decodedLine, subscriptionId, groupName)
+                                }
+                            }
+                            if (server != null && seenIds.add(server.id)) {
+                                parsedRaw.add(server)
+                            }
+                        }
+                    }
+                    if (parsedRaw.isNotEmpty()) break
+                }
+            }
         }
 
-        return servers
+        return sanitizeAndDeduplicate(parsedRaw)
     }
 
     fun parseClashYaml(content: String, subscriptionId: String, defaultGroup: String): List<VpnServer> {
@@ -726,15 +793,26 @@ object ProtocolParser {
     }
 
     private fun extractGroupFromName(name: String, fallback: String): String {
+        val upper = name.uppercase()
         return when {
-            name.contains("DE") || name.contains("Germany") || name.contains("Германия") -> "🇩🇪 Germany"
-            name.contains("NL") || name.contains("Netherlands") || name.contains("Нидерланды") -> "🇳🇱 Netherlands"
-            name.contains("US") || name.contains("USA") || name.contains("США") -> "🇺🇸 USA"
-            name.contains("FI") || name.contains("Finland") || name.contains("Финляндия") -> "🇫🇮 Finland"
-            name.contains("SG") || name.contains("Singapore") || name.contains("Сингапур") -> "🇸🇬 Singapore"
-            name.contains("JP") || name.contains("Japan") || name.contains("Япония") -> "🇯🇵 Japan"
-            name.contains("GB") || name.contains("UK") || name.contains("Британия") -> "🇬🇧 UK"
-            fallback.isNotEmpty() -> fallback
+            upper.contains("DE") || upper.contains("GERMANY") || upper.contains("ГЕРМАНИЯ") || upper.contains("FRANKFURT") -> "🇩🇪 Germany"
+            upper.contains("NL") || upper.contains("NETHERLANDS") || upper.contains("НИДЕРЛАНДЫ") || upper.contains("AMSTERDAM") -> "🇳🇱 Netherlands"
+            upper.contains("US") || upper.contains("USA") || upper.contains("США") || upper.contains("UNITED STATES") -> "🇺🇸 USA"
+            upper.contains("FI") || upper.contains("FINLAND") || upper.contains("ФИНЛЯНДИЯ") || upper.contains("HELSINKI") -> "🇫🇮 Finland"
+            upper.contains("SG") || upper.contains("SINGAPORE") || upper.contains("СИНГАПУР") -> "🇸🇬 Singapore"
+            upper.contains("JP") || upper.contains("JAPAN") || upper.contains("ЯПОНИЯ") || upper.contains("TOKYO") -> "🇯🇵 Japan"
+            upper.contains("GB") || upper.contains("UK") || upper.contains("БРИТАНИЯ") || upper.contains("LONDON") -> "🇬🇧 UK"
+            upper.contains("FR") || upper.contains("FRANCE") || upper.contains("ФРАНЦИЯ") || upper.contains("PARIS") -> "🇫🇷 France"
+            upper.contains("SE") || upper.contains("SWEDEN") || upper.contains("ШВЕЦИЯ") || upper.contains("STOCKHOLM") -> "🇸🇪 Sweden"
+            upper.contains("PL") || upper.contains("POLAND") || upper.contains("ПОЛЬША") || upper.contains("WARSAW") -> "🇵🇱 Poland"
+            upper.contains("TR") || upper.contains("TURKEY") || upper.contains("ТУРЦИЯ") || upper.contains("ISTANBUL") -> "🇹🇷 Turkey"
+            upper.contains("KZ") || upper.contains("KAZAKHSTAN") || upper.contains("КАЗАХСТАН") -> "🇰🇿 Kazakhstan"
+            upper.contains("AT") || upper.contains("AUSTRIA") || upper.contains("АВСТРИЯ") || upper.contains("VIENNA") -> "🇦🇹 Austria"
+            upper.contains("CH") || upper.contains("SWITZERLAND") || upper.contains("ШВЕЙЦАРИЯ") || upper.contains("ZURICH") -> "🇨🇭 Switzerland"
+            upper.contains("CA") || upper.contains("CANADA") || upper.contains("КАНАДА") || upper.contains("TORONTO") -> "🇨🇦 Canada"
+            upper.contains("ES") || upper.contains("SPAIN") || upper.contains("ИСПАНИЯ") || upper.contains("MADRID") -> "🇪🇸 Spain"
+            upper.contains("IT") || upper.contains("ITALY") || upper.contains("ИТАЛИЯ") || upper.contains("MILAN") -> "🇮🇹 Italy"
+            fallback.isNotEmpty() && fallback != "Default" && fallback != "manual" -> fallback
             else -> "General"
         }
     }

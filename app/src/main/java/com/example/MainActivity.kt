@@ -63,8 +63,7 @@ fun MainAppScreen(viewModel: VpnViewModel) {
         NavItem.Home,
         NavItem.Servers,
         NavItem.Split,
-        NavItem.Subscriptions,
-        NavItem.Logs
+        NavItem.Subscriptions
     )
 
     Scaffold(

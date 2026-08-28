@@ -10,7 +10,7 @@ import com.example.data.model.VpnServer
 
 @Database(
     entities = [VpnServer::class, Subscription::class, AppRule::class],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
