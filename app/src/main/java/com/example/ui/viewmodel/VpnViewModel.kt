@@ -168,14 +168,32 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     fun updateSubscription(subId: String) {
         viewModelScope.launch {
             _isSubLoading.value = true
-            _subStateMessage.value = "Updating subscription..."
+            _subStateMessage.value = "Обновление подписки..."
             val result = repository.updateSubscription(subId)
             _isSubLoading.value = false
             result.onSuccess {
-                _subStateMessage.value = "Subscription updated (${it.serverCount} servers)."
+                _subStateMessage.value = "Подписка обновлена (${it.serverCount} серверов)."
             }.onFailure { err ->
-                _subStateMessage.value = "Failed: ${err.localizedMessage}"
+                _subStateMessage.value = "Ошибка: ${err.localizedMessage ?: "Не удалось обновить"}"
             }
+        }
+    }
+
+    fun updateAllSubscriptions() {
+        if (_isSubLoading.value) return
+        viewModelScope.launch {
+            _isSubLoading.value = true
+            _subStateMessage.value = "Обновление всех подписок..."
+            val list = subscriptions.value
+            var totalServers = 0
+            for (sub in list) {
+                val res = repository.updateSubscription(sub.id)
+                res.getOrNull()?.let {
+                    totalServers += it.serverCount
+                }
+            }
+            _isSubLoading.value = false
+            _subStateMessage.value = "Все подписки обновлены (всего серверов: $totalServers)."
         }
     }
 

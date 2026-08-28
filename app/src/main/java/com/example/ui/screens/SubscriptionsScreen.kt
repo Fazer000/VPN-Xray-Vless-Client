@@ -1,5 +1,6 @@
 package com.example.ui.screens
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -13,11 +14,14 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.model.Subscription
+import com.example.data.model.VpnServer
 import com.example.ui.theme.*
 import com.example.ui.viewmodel.VpnViewModel
 import java.text.SimpleDateFormat
@@ -28,11 +32,13 @@ fun SubscriptionsScreen(
     viewModel: VpnViewModel
 ) {
     val subscriptions by viewModel.subscriptions.collectAsState()
+    val servers by viewModel.servers.collectAsState()
+    val selectedServer by viewModel.selectedServer.collectAsState()
     val isSubLoading by viewModel.isSubLoading.collectAsState()
     val subStateMessage by viewModel.subStateMessage.collectAsState()
 
     var showAddDialog by remember { mutableStateOf(false) }
-
+    val clipboardManager = LocalClipboardManager.current
     val snackbarHostState = remember { SnackbarHostState() }
 
     LaunchedEffect(subStateMessage) {
@@ -41,6 +47,13 @@ fun SubscriptionsScreen(
             viewModel.clearSubStateMessage()
         }
     }
+
+    val totalServersCount = remember(servers) { servers.size }
+    val lastUpdatedSub = remember(subscriptions) {
+        subscriptions.maxByOrNull { it.lastUpdated }
+    }
+
+    val dateFormat = remember { SimpleDateFormat("dd MMM YYYY, HH:mm", Locale("ru")) }
 
     Scaffold(
         containerColor = CyberBackground,
@@ -52,7 +65,7 @@ fun SubscriptionsScreen(
                 contentColor = Color.Black,
                 modifier = Modifier.testTag("add_subscription_fab")
             ) {
-                Icon(Icons.Default.Add, contentDescription = "Add Subscription")
+                Icon(Icons.Default.Add, contentDescription = "Добавить подписку")
             }
         }
     ) { padding ->
@@ -72,24 +85,40 @@ fun SubscriptionsScreen(
             ) {
                 Column {
                     Text(
-                        text = "Subscriptions",
+                        text = "Подписки V2Ray",
                         fontSize = 22.sp,
                         fontWeight = FontWeight.Bold,
                         color = TextPrimary
                     )
                     Text(
-                        text = "V2Ray / V2RayTun URL Feeds",
+                        text = "Управление источниками и фидами серверов",
                         fontSize = 12.sp,
                         color = TextSecondary
                     )
                 }
 
-                if (isSubLoading) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(20.dp),
-                        color = CyberCyan,
-                        strokeWidth = 2.dp
-                    )
+                if (subscriptions.isNotEmpty()) {
+                    IconButton(
+                        onClick = { viewModel.updateAllSubscriptions() },
+                        enabled = !isSubLoading,
+                        modifier = Modifier
+                            .background(CyberSurface, RoundedCornerShape(10.dp))
+                            .testTag("update_all_subs_btn")
+                    ) {
+                        if (isSubLoading) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(18.dp),
+                                color = CyberCyan,
+                                strokeWidth = 2.dp
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.Default.Sync,
+                                contentDescription = "Обновить все",
+                                tint = CyberCyan
+                            )
+                        }
+                    }
                 }
             }
 
@@ -103,45 +132,178 @@ fun SubscriptionsScreen(
                     contentAlignment = Alignment.Center
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Icon(
-                            imageVector = Icons.Default.RssFeed,
-                            contentDescription = "No Subscriptions",
-                            tint = TextSecondary,
-                            modifier = Modifier.size(52.dp)
-                        )
+                        Surface(
+                            shape = RoundedCornerShape(20.dp),
+                            color = CyberSurface,
+                            modifier = Modifier.padding(16.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.RssFeed,
+                                contentDescription = "Нет подписок",
+                                tint = CyberCyan,
+                                modifier = Modifier
+                                    .padding(24.dp)
+                                    .size(56.dp)
+                            )
+                        }
                         Spacer(modifier = Modifier.height(12.dp))
                         Text(
-                            text = "No Subscriptions Added",
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.SemiBold,
+                            text = "Нет активных подписок",
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold,
                             color = TextPrimary
                         )
                         Spacer(modifier = Modifier.height(6.dp))
                         Text(
-                            text = "Tap + to add a V2RayTun subscription link",
-                            fontSize = 12.sp,
-                            color = TextSecondary
+                            text = "Добавьте ссылку подписки V2Ray / V2RayTun,\nчтобы автоматически загрузить список серверов",
+                            fontSize = 13.sp,
+                            color = TextSecondary,
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
                         )
-                        Spacer(modifier = Modifier.height(16.dp))
+                        Spacer(modifier = Modifier.height(20.dp))
 
                         Button(
                             onClick = { showAddDialog = true },
                             colors = ButtonDefaults.buttonColors(containerColor = CyberCyan, contentColor = Color.Black),
                             shape = RoundedCornerShape(12.dp)
                         ) {
-                            Text("Add Subscription Link", fontWeight = FontWeight.Bold)
+                            Icon(Icons.Default.AddLink, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Добавить подписку", fontWeight = FontWeight.Bold)
                         }
                     }
                 }
             } else {
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
+                    // Summary Information Dashboard Banner
+                    item {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(16.dp),
+                            colors = CardDefaults.cardColors(containerColor = CyberSurface)
+                        ) {
+                            Column(modifier = Modifier.padding(16.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(
+                                            imageVector = Icons.Default.Analytics,
+                                            contentDescription = "Сводка",
+                                            tint = CyberCyan,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text(
+                                            text = "Сводка подписок",
+                                            fontSize = 15.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = TextPrimary
+                                        )
+                                    }
+
+                                    Surface(
+                                        shape = RoundedCornerShape(20.dp),
+                                        color = CyberGreen.copy(alpha = 0.15f)
+                                    ) {
+                                        Text(
+                                            text = "● Активно",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = CyberGreen,
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                        )
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.height(12.dp))
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Column {
+                                        Text("Всего источников", fontSize = 11.sp, color = TextSecondary)
+                                        Text(
+                                            text = "${subscriptions.size}",
+                                            fontSize = 18.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = TextPrimary
+                                        )
+                                    }
+
+                                    Column {
+                                        Text("Импортировано узлов", fontSize = 11.sp, color = TextSecondary)
+                                        Text(
+                                            text = "$totalServersCount серверов",
+                                            fontSize = 18.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = CyberGreen
+                                        )
+                                    }
+
+                                    Column {
+                                        Text("Автообновление", fontSize = 11.sp, color = TextSecondary)
+                                        Text(
+                                            text = "Каждые 24 ч",
+                                            fontSize = 13.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = CyberCyan
+                                        )
+                                    }
+                                }
+
+                                if (selectedServer != null) {
+                                    Spacer(modifier = Modifier.height(12.dp))
+                                    Divider(color = CyberSurfaceVariant)
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Dns,
+                                            contentDescription = "Активный сервер",
+                                            tint = TextSecondary,
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = "Выбран узел: ",
+                                            fontSize = 11.sp,
+                                            color = TextSecondary
+                                        )
+                                        Text(
+                                            text = selectedServer?.name ?: "",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = TextPrimary,
+                                            maxLines = 1
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     items(subscriptions, key = { it.id }) { sub ->
+                        val subServers = remember(servers, sub.id) {
+                            servers.filter { it.subscriptionId == sub.id }
+                        }
+
                         SubscriptionCard(
                             subscription = sub,
+                            subServers = subServers,
                             isSubLoading = isSubLoading,
+                            dateFormat = dateFormat,
+                            onCopyUrl = {
+                                clipboardManager.setText(AnnotatedString(sub.url))
+                            },
                             onUpdate = { viewModel.updateSubscription(sub.id) },
                             onDelete = { viewModel.deleteSubscription(sub.id) }
                         )
@@ -167,11 +329,16 @@ fun SubscriptionsScreen(
 @Composable
 fun SubscriptionCard(
     subscription: Subscription,
+    subServers: List<VpnServer>,
     isSubLoading: Boolean,
+    dateFormat: SimpleDateFormat,
+    onCopyUrl: () -> Unit,
     onUpdate: () -> Unit,
     onDelete: () -> Unit
 ) {
-    val dateFormat = remember { SimpleDateFormat("dd MMM, HH:mm", Locale.getDefault()) }
+    val protocolCounts = remember(subServers) {
+        subServers.groupingBy { it.protocol.name }.eachCount()
+    }
 
     Card(
         modifier = Modifier
@@ -181,12 +348,16 @@ fun SubscriptionCard(
         colors = CardDefaults.cardColors(containerColor = CyberSurface)
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
+            // Title & Quick Actions
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f)
+                ) {
                     Icon(
                         imageVector = Icons.Default.RssFeed,
                         contentDescription = "Subscription",
@@ -198,7 +369,8 @@ fun SubscriptionCard(
                         text = subscription.name,
                         fontSize = 16.sp,
                         fontWeight = FontWeight.Bold,
-                        color = TextPrimary
+                        color = TextPrimary,
+                        maxLines = 1
                     )
                 }
 
@@ -210,7 +382,7 @@ fun SubscriptionCard(
                     ) {
                         Icon(
                             imageVector = Icons.Default.Refresh,
-                            contentDescription = "Refresh",
+                            contentDescription = "Обновить",
                             tint = CyberCyan
                         )
                     }
@@ -221,7 +393,7 @@ fun SubscriptionCard(
                     ) {
                         Icon(
                             imageVector = Icons.Default.DeleteOutline,
-                            contentDescription = "Delete",
+                            contentDescription = "Удалить",
                             tint = CyberRed
                         )
                     }
@@ -230,15 +402,60 @@ fun SubscriptionCard(
 
             Spacer(modifier = Modifier.height(4.dp))
 
-            Text(
-                text = subscription.url,
-                fontSize = 11.sp,
-                color = TextSecondary,
-                maxLines = 1
-            )
+            // URL with Copy button
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(CyberSurfaceVariant, RoundedCornerShape(8.dp))
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = subscription.url,
+                    fontSize = 11.sp,
+                    color = TextSecondary,
+                    maxLines = 1,
+                    modifier = Modifier.weight(1f)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Icon(
+                    imageVector = Icons.Default.ContentCopy,
+                    contentDescription = "Скопировать URL",
+                    tint = CyberCyan,
+                    modifier = Modifier
+                        .size(16.dp)
+                        .clickable { onCopyUrl() }
+                )
+            }
 
             Spacer(modifier = Modifier.height(12.dp))
 
+            // Protocol distribution chips
+            if (protocolCounts.isNotEmpty()) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    protocolCounts.forEach { (proto, count) ->
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = CyberCyan.copy(alpha = 0.12f)
+                        ) {
+                            Text(
+                                text = "$proto: $count",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = CyberCyan,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(10.dp))
+            }
+
+            // Server Count & Last Updated Row
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -246,19 +463,30 @@ fun SubscriptionCard(
             ) {
                 Surface(
                     shape = RoundedCornerShape(8.dp),
-                    color = CyberSurfaceVariant
+                    color = CyberGreen.copy(alpha = 0.15f)
                 ) {
-                    Text(
-                        text = "${subscription.serverCount} servers imported",
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = CyberGreen,
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                    )
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.CheckCircle,
+                            contentDescription = null,
+                            tint = CyberGreen,
+                            modifier = Modifier.size(12.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "${subscription.serverCount} узлов загружено",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = CyberGreen
+                        )
+                    }
                 }
 
                 Text(
-                    text = "Updated: ${dateFormat.format(Date(subscription.lastUpdated))}",
+                    text = "Обновлено: ${dateFormat.format(Date(subscription.lastUpdated))}",
                     fontSize = 11.sp,
                     color = TextSecondary
                 )
@@ -339,3 +567,4 @@ fun AddSubscriptionDialog(
         }
     )
 }
+
