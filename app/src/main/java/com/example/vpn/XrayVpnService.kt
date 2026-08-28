@@ -360,8 +360,9 @@ class XrayVpnService : VpnService() {
         var clientSeq: Long,
         var serverSeq: Long,
         var socket: Socket? = null,
-        var isConnected: Boolean = false,
-        var isClosed: Boolean = false
+        @Volatile var isConnected: Boolean = false,
+        @Volatile var isClosed: Boolean = false,
+        val pendingOutboundData: ByteArrayOutputStream = ByteArrayOutputStream()
     )
 
     private fun startTunPacketRelay(
@@ -490,10 +491,9 @@ class XrayVpnService : VpnService() {
 
         if (isSyn) {
             if (existingSession != null && !existingSession.isClosed) {
-                if (existingSession.isConnected) {
-                    // Retransmitted SYN: re-send SYN-ACK
-                    sendTcpPacket(output, dstIp, srcIp, dstPort, srcPort, (existingSession.serverSeq - 1) and 0xFFFFFFFFL, existingSession.clientSeq, 0x12, null)
-                }
+                // Retransmitted SYN -> Re-send SYN-ACK
+                val lastServerSeq = (existingSession.serverSeq - 1) and 0xFFFFFFFFL
+                sendTcpPacket(output, dstIp, srcIp, dstPort, srcPort, lastServerSeq, existingSession.clientSeq, 0x12, null)
                 return
             }
 
@@ -508,6 +508,11 @@ class XrayVpnService : VpnService() {
             )
             tcpSessions[key] = session
 
+            // 1. Immediately send SYN-ACK (0x12) to local client so handshake completes instantly
+            sendTcpPacket(output, dstIp, srcIp, dstPort, srcPort, session.serverSeq, session.clientSeq, 0x12, null)
+            session.serverSeq = (session.serverSeq + 1) and 0xFFFFFFFFL
+
+            // 2. Connect proxy socket asynchronously in background thread
             serviceScope.launch(Dispatchers.IO) {
                 try {
                     val targetHost = if (dstIpStr.isNotEmpty()) dstIpStr else "127.0.0.1"
@@ -518,17 +523,37 @@ class XrayVpnService : VpnService() {
                         targetHost, dstPort
                     )
 
-                    session.socket = socket
-                    session.isConnected = true
+                    synchronized(session) {
+                        if (!session.isClosed) {
+                            session.socket = socket
+                            session.isConnected = true
 
-                    // Send SYN-ACK (0x12)
-                    sendTcpPacket(output, dstIp, srcIp, dstPort, srcPort, session.serverSeq, session.clientSeq, 0x12, null)
-                    session.serverSeq = (session.serverSeq + 1) and 0xFFFFFFFFL
+                            // Flush any payload bytes buffered while proxy was establishing
+                            val pendingBytes = session.pendingOutboundData.toByteArray()
+                            if (pendingBytes.isNotEmpty()) {
+                                try {
+                                    socket.getOutputStream().write(pendingBytes)
+                                    socket.getOutputStream().flush()
+                                } catch (e: Exception) {
+                                    Log.d("XrayVpnService", "Error writing pending bytes to proxy: ${e.message}")
+                                }
+                                session.pendingOutboundData.reset()
+                            }
+                        } else {
+                            try { socket.close() } catch (_: Exception) {}
+                            return@launch
+                        }
+                    }
 
                     launchSocketReader(session, output)
                 } catch (e: Exception) {
                     Log.d("XrayVpnService", "TCP connect error to $dstIpStr:$dstPort: ${e.message}")
-                    sendTcpPacket(output, dstIp, srcIp, dstPort, srcPort, 0L, (seqVal + 1) and 0xFFFFFFFFL, 0x04, null)
+                    synchronized(session) {
+                        if (!session.isClosed) {
+                            session.isClosed = true
+                            sendTcpPacket(output, dstIp, srcIp, dstPort, srcPort, session.serverSeq, session.clientSeq, 0x04, null)
+                        }
+                    }
                     tcpSessions.remove(key)
                 }
             }
@@ -543,17 +568,21 @@ class XrayVpnService : VpnService() {
         }
 
         if (isRst) {
-            existingSession.isClosed = true
-            try { existingSession.socket?.close() } catch (_: Exception) {}
+            synchronized(existingSession) {
+                existingSession.isClosed = true
+                try { existingSession.socket?.close() } catch (_: Exception) {}
+            }
             tcpSessions.remove(key)
             return
         }
 
         if (isFin) {
-            existingSession.clientSeq = (seqVal + payloadLen.coerceAtLeast(1)) and 0xFFFFFFFFL
-            sendTcpPacket(output, dstIp, srcIp, dstPort, srcPort, existingSession.serverSeq, existingSession.clientSeq, 0x11, null)
-            existingSession.isClosed = true
-            try { existingSession.socket?.close() } catch (_: Exception) {}
+            synchronized(existingSession) {
+                existingSession.clientSeq = (seqVal + payloadLen.coerceAtLeast(1)) and 0xFFFFFFFFL
+                sendTcpPacket(output, dstIp, srcIp, dstPort, srcPort, existingSession.serverSeq, existingSession.clientSeq, 0x11, null)
+                existingSession.isClosed = true
+                try { existingSession.socket?.close() } catch (_: Exception) {}
+            }
             tcpSessions.remove(key)
             return
         }
@@ -561,22 +590,30 @@ class XrayVpnService : VpnService() {
         if (payloadLen > 0) {
             val payload = ByteArray(payloadLen)
             System.arraycopy(buffer, headerLength + tcpHeaderLength, payload, 0, payloadLen)
-            existingSession.clientSeq = (seqVal + payloadLen) and 0xFFFFFFFFL
 
-            serviceScope.launch(Dispatchers.IO) {
-                try {
-                    var waitMs = 0
-                    while (!existingSession.isConnected && !existingSession.isClosed && waitMs < 5000) {
-                        delay(20)
-                        waitMs += 20
+            synchronized(existingSession) {
+                existingSession.clientSeq = (seqVal + payloadLen) and 0xFFFFFFFFL
+
+                // Immediately ACK client payload
+                sendTcpPacket(output, dstIp, srcIp, dstPort, srcPort, existingSession.serverSeq, existingSession.clientSeq, 0x10, null)
+
+                if (existingSession.isConnected && !existingSession.isClosed) {
+                    val sock = existingSession.socket
+                    if (sock != null) {
+                        serviceScope.launch(Dispatchers.IO) {
+                            try {
+                                sock.getOutputStream().write(payload)
+                                sock.getOutputStream().flush()
+                            } catch (e: Exception) {
+                                Log.d("XrayVpnService", "TCP socket write error: ${e.message}")
+                            }
+                        }
                     }
-                    if (existingSession.isConnected && !existingSession.isClosed) {
-                        existingSession.socket?.getOutputStream()?.write(payload)
-                        existingSession.socket?.getOutputStream()?.flush()
-                        sendTcpPacket(output, dstIp, srcIp, dstPort, srcPort, existingSession.serverSeq, existingSession.clientSeq, 0x10, null)
+                } else if (!existingSession.isClosed) {
+                    // Proxy is still connecting -> Buffer payload
+                    if (existingSession.pendingOutboundData.size() < 1024 * 1024) {
+                        existingSession.pendingOutboundData.write(payload)
                     }
-                } catch (e: Exception) {
-                    Log.d("XrayVpnService", "TCP socket write error: ${e.message}")
                 }
             }
         }
@@ -625,6 +662,7 @@ class XrayVpnService : VpnService() {
         val socket = Socket()
         protect(socket)
         socket.tcpNoDelay = true
+        socket.keepAlive = true
         val targetAddr = InetAddress.getByName(targetHost)
         socket.connect(InetSocketAddress(targetAddr, targetPort), 5000)
         return socket
@@ -644,6 +682,7 @@ class XrayVpnService : VpnService() {
         val rawSocket = Socket()
         protect(rawSocket)
         rawSocket.tcpNoDelay = true
+        rawSocket.keepAlive = true
         rawSocket.connect(InetSocketAddress(serverHost, serverPort), 7000)
 
         val tlsSocket = if (serverSecurity.equals("tls", ignoreCase = true) || serverSecurity.equals("reality", ignoreCase = true) || serverPort == 443) {
@@ -688,6 +727,7 @@ class XrayVpnService : VpnService() {
         val rawSocket = Socket()
         protect(rawSocket)
         rawSocket.tcpNoDelay = true
+        rawSocket.keepAlive = true
         rawSocket.connect(InetSocketAddress(serverHost, serverPort), 7000)
 
         val tlsSocket = if (serverSecurity.equals("none", ignoreCase = true)) {
@@ -1069,17 +1109,23 @@ class XrayVpnService : VpnService() {
                     while (offset < read) {
                         val chunkSize = Math.min(read - offset, maxMss)
                         val chunk = buffer.copyOfRange(offset, offset + chunkSize)
-                        sendTcpPacket(output, session.serverIp, session.clientIp, session.dstPort, session.srcPort, session.serverSeq, session.clientSeq, 0x18, chunk)
-                        session.serverSeq = (session.serverSeq + chunkSize) and 0xFFFFFFFFL
+                        synchronized(session) {
+                            if (!session.isClosed) {
+                                sendTcpPacket(output, session.serverIp, session.clientIp, session.dstPort, session.srcPort, session.serverSeq, session.clientSeq, 0x18, chunk)
+                                session.serverSeq = (session.serverSeq + chunkSize) and 0xFFFFFFFFL
+                            }
+                        }
                         offset += chunkSize
                     }
                 }
             } catch (_: Exception) {
             } finally {
-                if (!session.isClosed) {
-                    session.isClosed = true
-                    sendTcpPacket(output, session.serverIp, session.clientIp, session.dstPort, session.srcPort, session.serverSeq, session.clientSeq, 0x11, null)
-                    session.serverSeq = (session.serverSeq + 1) and 0xFFFFFFFFL
+                synchronized(session) {
+                    if (!session.isClosed) {
+                        session.isClosed = true
+                        sendTcpPacket(output, session.serverIp, session.clientIp, session.dstPort, session.srcPort, session.serverSeq, session.clientSeq, 0x11, null)
+                        session.serverSeq = (session.serverSeq + 1) and 0xFFFFFFFFL
+                    }
                 }
                 try { socket.close() } catch (_: Exception) {}
                 tcpSessions.remove(session.key)
