@@ -441,12 +441,18 @@ class XrayVpnService : VpnService() {
                                     if (payloadLen > 0) {
                                         val dnsPayload = ByteArray(payloadLen)
                                         System.arraycopy(buffer, headerLength + 8, dnsPayload, 0, payloadLen)
-                                        forwardDnsQuery(dnsPayload, srcIp, srcPort, dstIp, dstPort, output)
+                                        forwardDnsQuery(
+                                            dnsPayload, srcIp, srcPort, dstIp, dstPort, output,
+                                            serverHost, serverPort, serverProtocol, serverUuid, serverSecurity, serverNetwork, serverPath, serverSni
+                                        )
                                     }
                                 } else if (payloadLen > 0) {
                                     val udpPayload = ByteArray(payloadLen)
                                     System.arraycopy(buffer, headerLength + 8, udpPayload, 0, payloadLen)
-                                    forwardUdpPacket(udpPayload, srcIp, srcPort, dstIp, dstPort, output)
+                                    forwardUdpPacket(
+                                        udpPayload, srcIp, srcPort, dstIp, dstPort, output,
+                                        serverHost, serverPort, serverProtocol, serverUuid, serverSecurity, serverNetwork, serverPath, serverSni
+                                    )
                                 }
                             }
                         }
@@ -620,6 +626,8 @@ class XrayVpnService : VpnService() {
         }
     }
 
+    private val dnsCache = java.util.concurrent.ConcurrentHashMap<String, ByteArray>()
+
     private fun connectProxySocket(
         serverHost: String,
         serverPort: Int,
@@ -633,29 +641,10 @@ class XrayVpnService : VpnService() {
         targetPort: Int
     ): Socket {
         LogManager.d("Outbound", "Routing stream -> $serverProtocol://$serverHost:$serverPort -> $targetHost:$targetPort")
-        return try {
-            when (serverProtocol.uppercase()) {
-                "VLESS" -> establishVlessConnection(serverHost, serverPort, serverUuid, serverSecurity, serverNetwork, serverPath, serverSni, targetHost, targetPort)
-                "TROJAN" -> establishTrojanConnection(serverHost, serverPort, serverUuid, serverSecurity, serverNetwork, serverPath, serverSni, targetHost, targetPort)
-                "SOCKS", "SOCKS5" -> establishSocks5Connection(serverHost, serverPort, serverUuid, targetHost, targetPort)
-                "VMESS" -> {
-                    try {
-                        establishVlessConnection(serverHost, serverPort, serverUuid, serverSecurity, serverNetwork, serverPath, serverSni, targetHost, targetPort)
-                    } catch (_: Exception) {
-                        establishTrojanConnection(serverHost, serverPort, serverUuid, serverSecurity, serverNetwork, serverPath, serverSni, targetHost, targetPort)
-                    }
-                }
-                else -> {
-                    try {
-                        establishVlessConnection(serverHost, serverPort, serverUuid, serverSecurity, serverNetwork, serverPath, serverSni, targetHost, targetPort)
-                    } catch (_: Exception) {
-                        establishDirectConnection(targetHost, targetPort)
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            LogManager.e("Outbound", "Proxy connect failed for $serverProtocol ($serverHost:$serverPort) -> $targetHost:$targetPort: ${e.message}")
-            establishDirectConnection(targetHost, targetPort)
+        return when (serverProtocol.uppercase()) {
+            "TROJAN" -> establishTrojanConnection(serverHost, serverPort, serverUuid, serverSecurity, serverNetwork, serverPath, serverSni, targetHost, targetPort)
+            "SOCKS", "SOCKS5" -> establishSocks5Connection(serverHost, serverPort, serverUuid, targetHost, targetPort)
+            else -> establishVlessConnection(serverHost, serverPort, serverUuid, serverSecurity, serverNetwork, serverPath, serverSni, targetHost, targetPort)
         }
     }
 
@@ -977,65 +966,144 @@ class XrayVpnService : VpnService() {
         clientPort: Int,
         dnsServerIp: ByteArray,
         dnsPort: Int,
-        output: FileOutputStream
+        output: FileOutputStream,
+        serverHost: String,
+        serverPort: Int,
+        serverProtocol: String,
+        serverUuid: String,
+        serverSecurity: String,
+        serverNetwork: String,
+        serverPath: String,
+        serverSni: String
     ) {
         serviceScope.launch(Dispatchers.IO) {
+            // Check DNS cache first for instant 0ms response
+            val cacheKey = dnsPayload.contentHashCode().toString()
+            val cachedResp = dnsCache[cacheKey]
+            if (cachedResp != null) {
+                sendUdpPacketToTun(output, dnsServerIp, dnsPort, clientIp, clientPort, cachedResp)
+                return@launch
+            }
+
             val dohEndpoints = listOf(
-                "https://1.1.1.1/dns-query",
-                "https://dns.google/dns-query",
-                "https://dns.quad9.net/dns-query",
-                "https://dns.adguard-dns.com/dns-query"
+                "1.1.1.1",
+                "8.8.8.8",
+                "9.9.9.9",
+                "185.228.168.168"
             )
             var dohSuccess = false
 
-            for (endpoint in dohEndpoints) {
+            for (dohHost in dohEndpoints) {
                 if (dohSuccess) break
                 try {
-                    val reqBody = dnsPayload.toRequestBody("application/dns-message".toMediaType())
-                    val request = Request.Builder()
-                        .url(endpoint)
-                        .post(reqBody)
-                        .header("Accept", "application/dns-message")
-                        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-                        .build()
-
-                    val response = okHttpClient.newCall(request).execute()
-                    if (response.isSuccessful) {
-                        val respDnsPayload = response.body?.bytes()
-                        if (respDnsPayload != null && respDnsPayload.isNotEmpty()) {
-                            sendUdpPacketToTun(output, dnsServerIp, dnsPort, clientIp, clientPort, respDnsPayload)
-                            dohSuccess = true
-                            LogManager.d("DNS", "Resolved DNS via DoH ($endpoint)")
-                        }
+                    val respDnsPayload = queryDohOverProxy(
+                        dnsPayload, serverHost, serverPort, serverProtocol,
+                        serverUuid, serverSecurity, serverNetwork, serverPath, serverSni, dohHost
+                    )
+                    if (respDnsPayload != null && respDnsPayload.isNotEmpty()) {
+                        dnsCache[cacheKey] = respDnsPayload
+                        sendUdpPacketToTun(output, dnsServerIp, dnsPort, clientIp, clientPort, respDnsPayload)
+                        dohSuccess = true
+                        LogManager.d("DNS", "Resolved DNS via Proxied DoH ($dohHost)")
                     }
                 } catch (e: Exception) {
-                    LogManager.d("DNS", "DoH ($endpoint) error: ${e.message}")
+                    LogManager.d("DNS", "Proxied DoH ($dohHost) error: ${e.message}")
                 }
             }
 
-            // Fallback to standard UDP socket if DoH failed
+            // Fallback: Query standard UDP DNS via VLESS tunnel
             if (!dohSuccess) {
                 try {
-                    java.net.DatagramSocket().use { socket ->
-                        protect(socket)
-                        socket.soTimeout = 3000
-                        val targetAddress = InetAddress.getByAddress(dnsServerIp)
-                        val outPacket = java.net.DatagramPacket(dnsPayload, dnsPayload.size, targetAddress, dnsPort)
-                        socket.send(outPacket)
-
-                        val respBuffer = ByteArray(4096)
-                        val inPacket = java.net.DatagramPacket(respBuffer, respBuffer.size)
-                        socket.receive(inPacket)
-
-                        val respDnsPayload = inPacket.data.copyOf(inPacket.length)
-                        sendUdpPacketToTun(output, dnsServerIp, dnsPort, clientIp, clientPort, respDnsPayload)
-                        LogManager.d("DNS", "Resolved DNS via UDP fallback")
-                    }
+                    forwardUdpViaVless(
+                        dnsPayload, clientIp, clientPort, dnsServerIp, dnsPort, output,
+                        serverHost, serverPort, serverProtocol, serverUuid, serverSecurity, serverNetwork, serverPath, serverSni
+                    )
                 } catch (e: Exception) {
-                    LogManager.w("DNS", "UDP DNS fallback failed: ${e.message}")
+                    LogManager.w("DNS", "VLESS DNS fallback failed: ${e.message}")
                 }
             }
         }
+    }
+
+    private fun queryDohOverProxy(
+        dnsPayload: ByteArray,
+        serverHost: String,
+        serverPort: Int,
+        serverProtocol: String,
+        serverUuid: String,
+        serverSecurity: String,
+        serverNetwork: String,
+        serverPath: String,
+        serverSni: String,
+        dohHost: String
+    ): ByteArray? {
+        var proxySocket: Socket? = null
+        try {
+            proxySocket = connectProxySocket(
+                serverHost, serverPort, serverProtocol, serverUuid,
+                serverSecurity, serverNetwork, serverPath, serverSni,
+                dohHost, 443
+            )
+            val sslContext = SSLContext.getInstance("TLS")
+            sslContext.init(null, arrayOf<TrustManager>(object : X509TrustManager {
+                override fun checkClientTrusted(chain: Array<out java.security.cert.X509Certificate>?, authType: String?) {}
+                override fun checkServerTrusted(chain: Array<out java.security.cert.X509Certificate>?, authType: String?) {}
+                override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = arrayOf()
+            }), java.security.SecureRandom())
+
+            val sslSocket = sslContext.socketFactory.createSocket(proxySocket, dohHost, 443, true) as SSLSocket
+            val sslParams = sslSocket.sslParameters
+            sslParams.serverNames = listOf(javax.net.ssl.SNIHostName(dohHost))
+            sslSocket.sslParameters = sslParams
+            sslSocket.soTimeout = 4000
+            sslSocket.startHandshake()
+
+            val req = "POST /dns-query HTTP/1.1\r\n" +
+                    "Host: $dohHost\r\n" +
+                    "Content-Type: application/dns-message\r\n" +
+                    "Accept: application/dns-message\r\n" +
+                    "Content-Length: ${dnsPayload.size}\r\n" +
+                    "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\r\n" +
+                    "Connection: close\r\n\r\n"
+
+            val out = sslSocket.getOutputStream()
+            out.write(req.toByteArray(Charsets.UTF_8))
+            out.write(dnsPayload)
+            out.flush()
+
+            val input = sslSocket.getInputStream()
+            val headerStr = readHttpResponseHeader(input)
+            if (headerStr.contains("200")) {
+                val contentLength = headerStr.lines()
+                    .firstOrNull { it.startsWith("Content-Length:", ignoreCase = true) }
+                    ?.split(":")?.getOrNull(1)?.trim()?.toIntOrNull()
+
+                return if (contentLength != null && contentLength > 0) {
+                    val body = ByteArray(contentLength)
+                    var bytesRead = 0
+                    while (bytesRead < contentLength) {
+                        val count = input.read(body, bytesRead, contentLength - bytesRead)
+                        if (count <= 0) break
+                        bytesRead += count
+                    }
+                    if (bytesRead == contentLength) body else null
+                } else {
+                    val bos = ByteArrayOutputStream()
+                    val buf = ByteArray(1024)
+                    while (true) {
+                        val len = input.read(buf)
+                        if (len <= 0) break
+                        bos.write(buf, 0, len)
+                    }
+                    bos.toByteArray()
+                }
+            }
+        } catch (e: Exception) {
+            LogManager.d("DNS", "DoH query via proxy to $dohHost failed: ${e.message}")
+        } finally {
+            try { proxySocket?.close() } catch (_: Exception) {}
+        }
+        return null
     }
 
     private fun sendUdpPacketToTun(
@@ -1236,25 +1304,100 @@ class XrayVpnService : VpnService() {
         clientPort: Int,
         serverIp: ByteArray,
         serverPort: Int,
-        output: FileOutputStream
+        output: FileOutputStream,
+        serverHost: String,
+        serverPortConfig: Int,
+        serverProtocol: String,
+        serverUuid: String,
+        serverSecurity: String,
+        serverNetwork: String,
+        serverPath: String,
+        serverSni: String
+    ) {
+        // Drop QUIC UDP (ports 443, 80, 8443) so browsers/Telegram instantly fallback to VLESS TCP
+        if (serverPort == 443 || serverPort == 80 || serverPort == 8443) {
+            return
+        }
+
+        forwardUdpViaVless(
+            udpPayload, clientIp, clientPort, serverIp, serverPort, output,
+            serverHost, serverPortConfig, serverProtocol, serverUuid, serverSecurity, serverNetwork, serverPath, serverSni
+        )
+    }
+
+    private fun forwardUdpViaVless(
+        udpPayload: ByteArray,
+        clientIp: ByteArray,
+        clientPort: Int,
+        serverIp: ByteArray,
+        serverPort: Int,
+        output: FileOutputStream,
+        serverHost: String,
+        serverPortConfig: Int,
+        serverProtocol: String,
+        serverUuid: String,
+        serverSecurity: String,
+        serverNetwork: String,
+        serverPath: String,
+        serverSni: String
     ) {
         serviceScope.launch(Dispatchers.IO) {
             try {
-                java.net.DatagramSocket().use { socket ->
-                    protect(socket)
-                    socket.soTimeout = 4000
-                    val targetAddress = InetAddress.getByAddress(serverIp)
-                    val outPacket = java.net.DatagramPacket(udpPayload, udpPayload.size, targetAddress, serverPort)
-                    socket.send(outPacket)
+                val dstHostStr = try { InetAddress.getByAddress(serverIp).hostAddress ?: "127.0.0.1" } catch (_: Exception) { "127.0.0.1" }
+                val rawSocket = Socket()
+                protect(rawSocket)
+                rawSocket.tcpNoDelay = true
+                rawSocket.soTimeout = 4000
+                rawSocket.connect(InetSocketAddress(serverHost, serverPortConfig), 5000)
 
-                    val respBuffer = ByteArray(8192)
-                    val inPacket = java.net.DatagramPacket(respBuffer, respBuffer.size)
-                    socket.receive(inPacket)
-
-                    val respPayload = inPacket.data.copyOf(inPacket.length)
-                    sendUdpPacketToTun(output, serverIp, serverPort, clientIp, clientPort, respPayload)
+                val tlsSocket = if (serverSecurity.equals("tls", ignoreCase = true) || serverSecurity.equals("reality", ignoreCase = true) || serverPortConfig == 443) {
+                    createTlsSocket(rawSocket, serverHost, serverPortConfig, serverSni)
+                } else {
+                    rawSocket
                 }
-            } catch (_: Exception) {
+
+                val socket = if (serverNetwork.equals("ws", ignoreCase = true)) {
+                    performWsUpgrade(tlsSocket, serverHost, serverPath, serverSni)
+                    WebSocketStreamSocket(tlsSocket)
+                } else {
+                    tlsSocket
+                }
+
+                val out = socket.getOutputStream()
+                val bos = ByteArrayOutputStream()
+                bos.write(0) // Version 0
+                bos.write(parseUuidToBytes(serverUuid))
+                bos.write(0) // Add length 0
+                bos.write(2) // Command: 2 = UDP
+                writeAddressAndPort(bos, dstHostStr, serverPort)
+
+                // Frame UDP payload
+                bos.write((udpPayload.size ushr 8) and 0xFF)
+                bos.write(udpPayload.size and 0xFF)
+                bos.write(udpPayload)
+
+                out.write(bos.toByteArray())
+                out.flush()
+
+                // Read UDP response from VLESS server
+                val input = socket.getInputStream()
+                val respBuf = ByteArray(8192)
+                val read = input.read(respBuf)
+                if (read > 2) {
+                    val addonLen = respBuf[1].toInt() and 0xFF
+                    val headerOffset = 2 + addonLen
+                    if (read > headerOffset + 2) {
+                        val respUdpLen = ((respBuf[headerOffset].toInt() and 0xFF) shl 8) or (respBuf[headerOffset + 1].toInt() and 0xFF)
+                        if (read >= headerOffset + 2 + respUdpLen) {
+                            val respPayload = ByteArray(respUdpLen)
+                            System.arraycopy(respBuf, headerOffset + 2, respPayload, 0, respUdpLen)
+                            sendUdpPacketToTun(output, serverIp, serverPort, clientIp, clientPort, respPayload)
+                        }
+                    }
+                }
+                try { socket.close() } catch (_: Exception) {}
+            } catch (e: Exception) {
+                LogManager.d("UDP", "VLESS UDP forwarding error: ${e.message}")
             }
         }
     }
