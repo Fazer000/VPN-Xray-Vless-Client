@@ -63,6 +63,12 @@ class XrayVpnService : VpnService() {
         const val EXTRA_SERVER_NETWORK = "extra_server_network"
         const val EXTRA_SERVER_PATH = "extra_server_path"
         const val EXTRA_SERVER_SNI = "extra_server_sni"
+        const val EXTRA_SERVER_PUBLIC_KEY = "extra_server_public_key"
+        const val EXTRA_SERVER_SHORT_ID = "extra_server_short_id"
+        const val EXTRA_SERVER_FINGERPRINT = "extra_server_fingerprint"
+        const val EXTRA_SERVER_FLOW = "extra_server_flow"
+        const val EXTRA_SERVER_SERVICE_NAME = "extra_server_service_name"
+        const val EXTRA_SERVER_ALPN = "extra_server_alpn"
         const val EXTRA_SERVER_RAW_LINK = "extra_server_raw_link"
         const val EXTRA_SPLIT_TUNNEL_ENABLED = "extra_split_tunnel_enabled"
         const val EXTRA_SPLIT_MODE = "extra_split_mode" // "PROXY" or "BYPASS"
@@ -122,21 +128,35 @@ class XrayVpnService : VpnService() {
 
         when (intent?.action) {
             ACTION_CONNECT -> {
-                val serverId = intent.getStringExtra(EXTRA_SERVER_ID) ?: ""
-                val serverHost = intent.getStringExtra(EXTRA_SERVER_HOST) ?: "127.0.0.1"
-                val serverPort = intent.getIntExtra(EXTRA_SERVER_PORT, 443)
-                val serverProtocol = intent.getStringExtra(EXTRA_SERVER_PROTOCOL) ?: "VLESS"
-                val serverUuid = intent.getStringExtra(EXTRA_SERVER_UUID) ?: ""
-                val serverSecurity = intent.getStringExtra(EXTRA_SERVER_SECURITY) ?: "tls"
-                val serverNetwork = intent.getStringExtra(EXTRA_SERVER_NETWORK) ?: "tcp"
-                val serverPath = intent.getStringExtra(EXTRA_SERVER_PATH) ?: ""
-                val serverSni = intent.getStringExtra(EXTRA_SERVER_SNI) ?: ""
+                val serverRawLink = intent.getStringExtra(EXTRA_SERVER_RAW_LINK) ?: ""
+                val parsedServer = if (serverRawLink.isNotEmpty()) com.example.util.ProtocolParser.parseLink(serverRawLink) else null
+
+                val serverHost = parsedServer?.host ?: intent.getStringExtra(EXTRA_SERVER_HOST) ?: "127.0.0.1"
+                val serverPort = if (parsedServer != null) parsedServer.port else intent.getIntExtra(EXTRA_SERVER_PORT, 443)
+                val serverProtocol = parsedServer?.protocol?.name ?: intent.getStringExtra(EXTRA_SERVER_PROTOCOL) ?: "VLESS"
+                val serverUuid = parsedServer?.uuid ?: intent.getStringExtra(EXTRA_SERVER_UUID) ?: ""
+                val serverSecurity = parsedServer?.security ?: intent.getStringExtra(EXTRA_SERVER_SECURITY) ?: "tls"
+                val serverNetwork = parsedServer?.network ?: intent.getStringExtra(EXTRA_SERVER_NETWORK) ?: "tcp"
+                val serverPath = parsedServer?.path ?: intent.getStringExtra(EXTRA_SERVER_PATH) ?: ""
+                val serverSni = parsedServer?.sni ?: intent.getStringExtra(EXTRA_SERVER_SNI) ?: ""
+                val serverPublicKey = parsedServer?.publicKey ?: intent.getStringExtra(EXTRA_SERVER_PUBLIC_KEY) ?: ""
+                val serverShortId = parsedServer?.shortId ?: intent.getStringExtra(EXTRA_SERVER_SHORT_ID) ?: ""
+                val serverFingerprint = parsedServer?.fingerprint ?: intent.getStringExtra(EXTRA_SERVER_FINGERPRINT) ?: "chrome"
+                val serverFlow = parsedServer?.flow ?: intent.getStringExtra(EXTRA_SERVER_FLOW) ?: ""
+                val serverServiceName = parsedServer?.serviceName ?: intent.getStringExtra(EXTRA_SERVER_SERVICE_NAME) ?: ""
+                val serverAlpn = parsedServer?.alpn ?: intent.getStringExtra(EXTRA_SERVER_ALPN) ?: "h2,http/1.1"
+
                 val splitEnabled = intent.getBooleanExtra(EXTRA_SPLIT_TUNNEL_ENABLED, false)
                 val splitMode = intent.getStringExtra(EXTRA_SPLIT_MODE) ?: "PROXY"
 
                 _activeServerName.value = serverName
                 safeStartForeground(buildNotification("Connecting to $serverName..."))
-                startVpnTunnel(serverName, serverHost, serverPort, serverProtocol, serverUuid, serverSecurity, serverNetwork, serverPath, serverSni, splitEnabled, splitMode)
+                startVpnTunnel(
+                    serverName, serverHost, serverPort, serverProtocol, serverUuid,
+                    serverSecurity, serverNetwork, serverPath, serverSni,
+                    serverPublicKey, serverShortId, serverFingerprint, serverFlow,
+                    serverServiceName, serverAlpn, splitEnabled, splitMode
+                )
             }
             ACTION_DISCONNECT -> {
                 safeStartForeground(buildNotification("Disconnecting..."))
@@ -167,8 +187,14 @@ class XrayVpnService : VpnService() {
         serverNetwork: String,
         serverPath: String,
         serverSni: String,
-        splitEnabled: Boolean,
-        splitMode: String
+        serverPublicKey: String = "",
+        serverShortId: String = "",
+        serverFingerprint: String = "chrome",
+        serverFlow: String = "",
+        serverServiceName: String = "",
+        serverAlpn: String = "h2,http/1.1",
+        splitEnabled: Boolean = false,
+        splitMode: String = "PROXY"
     ) {
         connectionJob?.cancel()
         _vpnState.value = State.CONNECTING
@@ -178,7 +204,7 @@ class XrayVpnService : VpnService() {
         _txBytes.value = 0L
 
         LogManager.i("Service", "Starting VPN session: '$serverName'")
-        LogManager.i("Service", "Target Server: $serverProtocol://$serverHost:$serverPort (Security: $serverSecurity, Net: $serverNetwork, SNI: $serverSni)")
+        LogManager.i("Service", "Target Server: $serverProtocol://$serverHost:$serverPort (Security: $serverSecurity, Net: $serverNetwork, SNI: $serverSni, pbk: ${serverPublicKey.take(6)}...)")
 
         connectionJob = serviceScope.launch {
             try {
@@ -275,7 +301,12 @@ class XrayVpnService : VpnService() {
                 // Start TUN packet handling loop for DNS queries, ICMP pings, and traffic relay
                 val input = FileInputStream(pfd.fileDescriptor)
                 val output = FileOutputStream(pfd.fileDescriptor)
-                startTunPacketRelay(input, output, serverHost, serverPort, serverProtocol, serverUuid, serverSecurity, serverNetwork, serverPath, serverSni)
+                startTunPacketRelay(
+                    input, output, serverHost, serverPort, serverProtocol, serverUuid,
+                    serverSecurity, serverNetwork, serverPath, serverSni,
+                    serverPublicKey, serverShortId, serverFingerprint, serverFlow,
+                    serverServiceName, serverAlpn
+                )
 
             } catch (e: Exception) {
                 Log.e("XrayVpnService", "VPN Error: ${e.message}", e)
@@ -396,7 +427,13 @@ class XrayVpnService : VpnService() {
         serverSecurity: String,
         serverNetwork: String,
         serverPath: String,
-        serverSni: String
+        serverSni: String,
+        serverPublicKey: String = "",
+        serverShortId: String = "",
+        serverFingerprint: String = "chrome",
+        serverFlow: String = "",
+        serverServiceName: String = "",
+        serverAlpn: String = "h2,http/1.1"
     ) {
         serviceScope.launch(Dispatchers.IO) {
             val buffer = ByteArray(32768)
@@ -451,7 +488,8 @@ class XrayVpnService : VpnService() {
                                 handleTcpPacket(
                                     buffer, headerLength, tcpHeaderLength, srcIp, dstIp,
                                     srcPort, dstPort, seqVal, ackVal, flags, payloadLen, output,
-                                    serverHost, serverPort, serverProtocol, serverUuid, serverSecurity, serverNetwork, serverPath, serverSni
+                                    serverHost, serverPort, serverProtocol, serverUuid, serverSecurity, serverNetwork, serverPath, serverSni,
+                                    serverPublicKey, serverShortId, serverFingerprint, serverFlow, serverServiceName, serverAlpn
                                 )
                             }
                         }
@@ -467,7 +505,8 @@ class XrayVpnService : VpnService() {
                                         System.arraycopy(buffer, headerLength + 8, dnsPayload, 0, payloadLen)
                                         forwardDnsQuery(
                                             dnsPayload, srcIp, srcPort, dstIp, dstPort, output,
-                                            serverHost, serverPort, serverProtocol, serverUuid, serverSecurity, serverNetwork, serverPath, serverSni
+                                            serverHost, serverPort, serverProtocol, serverUuid, serverSecurity, serverNetwork, serverPath, serverSni,
+                                            serverPublicKey, serverShortId, serverFingerprint, serverFlow, serverServiceName, serverAlpn
                                         )
                                     }
                                 } else if (payloadLen > 0) {
@@ -475,7 +514,8 @@ class XrayVpnService : VpnService() {
                                     System.arraycopy(buffer, headerLength + 8, udpPayload, 0, payloadLen)
                                     forwardUdpPacket(
                                         udpPayload, srcIp, srcPort, dstIp, dstPort, output,
-                                        serverHost, serverPort, serverProtocol, serverUuid, serverSecurity, serverNetwork, serverPath, serverSni
+                                        serverHost, serverPort, serverProtocol, serverUuid, serverSecurity, serverNetwork, serverPath, serverSni,
+                                        serverPublicKey, serverShortId, serverFingerprint, serverFlow, serverServiceName, serverAlpn
                                     )
                                 }
                             }
@@ -509,7 +549,13 @@ class XrayVpnService : VpnService() {
         serverSecurity: String,
         serverNetwork: String,
         serverPath: String,
-        serverSni: String
+        serverSni: String,
+        serverPublicKey: String = "",
+        serverShortId: String = "",
+        serverFingerprint: String = "chrome",
+        serverFlow: String = "",
+        serverServiceName: String = "",
+        serverAlpn: String = "h2,http/1.1"
     ) {
         val srcIpStr = try { InetAddress.getByAddress(srcIp).hostAddress ?: "" } catch (_: Exception) { "" }
         val dstIpStr = try { InetAddress.getByAddress(dstIp).hostAddress ?: "" } catch (_: Exception) { "" }
@@ -551,6 +597,7 @@ class XrayVpnService : VpnService() {
                     val socket = connectProxySocket(
                         serverHost, serverPort, serverProtocol, serverUuid,
                         serverSecurity, serverNetwork, serverPath, serverSni,
+                        serverPublicKey, serverShortId, serverFingerprint, serverFlow, serverServiceName, serverAlpn,
                         targetHost, dstPort
                     )
 
@@ -770,6 +817,12 @@ class XrayVpnService : VpnService() {
         serverNetwork: String,
         serverPath: String,
         serverSni: String,
+        serverPublicKey: String = "",
+        serverShortId: String = "",
+        serverFingerprint: String = "chrome",
+        serverFlow: String = "",
+        serverServiceName: String = "",
+        serverAlpn: String = "h2,http/1.1",
         targetHost: String,
         targetPort: Int
     ): Socket {
@@ -777,7 +830,11 @@ class XrayVpnService : VpnService() {
         return when (serverProtocol.uppercase()) {
             "TROJAN" -> establishTrojanConnection(serverHost, serverPort, serverUuid, serverSecurity, serverNetwork, serverPath, serverSni, targetHost, targetPort)
             "SOCKS", "SOCKS5" -> establishSocks5Connection(serverHost, serverPort, serverUuid, targetHost, targetPort)
-            else -> establishVlessConnection(serverHost, serverPort, serverUuid, serverSecurity, serverNetwork, serverPath, serverSni, targetHost, targetPort)
+            else -> establishVlessConnection(
+                serverHost, serverPort, serverUuid, serverSecurity, serverNetwork, serverPath, serverSni,
+                serverPublicKey, serverShortId, serverFingerprint, serverFlow, serverServiceName, serverAlpn,
+                targetHost, targetPort
+            )
         }
     }
 
@@ -798,6 +855,12 @@ class XrayVpnService : VpnService() {
         serverNetwork: String,
         serverPath: String,
         serverSni: String,
+        serverPublicKey: String = "",
+        serverShortId: String = "",
+        serverFingerprint: String = "chrome",
+        serverFlow: String = "",
+        serverServiceName: String = "",
+        serverAlpn: String = "h2,http/1.1",
         targetHost: String,
         targetPort: Int
     ): Socket {
@@ -807,20 +870,28 @@ class XrayVpnService : VpnService() {
         rawSocket.keepAlive = true
         rawSocket.connect(resolveServerAddress(serverHost, serverPort), 7000)
 
-        val tlsSocket = if (serverSecurity.equals("tls", ignoreCase = true) || serverSecurity.equals("reality", ignoreCase = true) || serverPort == 443) {
-            createTlsSocket(rawSocket, serverHost, serverPort, serverSni)
+        val socket = if (serverSecurity.equals("reality", ignoreCase = true) && serverPublicKey.isNotEmpty()) {
+            val pbkBytes = RealityHelper.parseHexOrBase64(serverPublicKey)
+            val sidBytes = RealityHelper.parseHexOrBase64(serverShortId)
+            val (clientHelloPacket, _) = RealityHelper.buildClientHello(serverSni.ifEmpty { serverHost }, pbkBytes, sidBytes, serverAlpn)
+            val out = rawSocket.getOutputStream()
+            out.write(clientHelloPacket)
+            out.flush()
+            rawSocket
+        } else if (serverSecurity.equals("tls", ignoreCase = true) || serverPort == 443) {
+            createTlsSocket(rawSocket, serverHost, serverPort, serverSni, serverAlpn)
         } else {
             rawSocket
         }
 
-        val socket = if (serverNetwork.equals("ws", ignoreCase = true)) {
-            performWsUpgrade(tlsSocket, serverHost, serverPath, serverSni)
-            WebSocketStreamSocket(tlsSocket)
+        val streamSocket = if (serverNetwork.equals("ws", ignoreCase = true)) {
+            performWsUpgrade(socket, serverHost, serverPath, serverSni)
+            WebSocketStreamSocket(socket)
         } else {
-            tlsSocket
+            socket
         }
 
-        val out = socket.getOutputStream()
+        val out = streamSocket.getOutputStream()
         val bos = ByteArrayOutputStream()
 
         bos.write(0) // Version 0
@@ -829,10 +900,16 @@ class XrayVpnService : VpnService() {
         bos.write(1) // Command: 1 = TCP
 
         writeAddressAndPort(bos, targetHost, targetPort)
+
+        if (serverFlow.equals("xtls-rprx-vision", ignoreCase = true)) {
+            // Vision flow padding header
+            bos.write(byteArrayOf(0x00, 0x00))
+        }
+
         out.write(bos.toByteArray())
         out.flush()
 
-        return VlessStreamSocket(socket)
+        return VlessStreamSocket(streamSocket)
     }
 
     private fun establishTrojanConnection(
@@ -970,7 +1047,7 @@ class XrayVpnService : VpnService() {
         return socket
     }
 
-    private fun createTlsSocket(plainSocket: Socket, host: String, port: Int, sniHost: String?): Socket {
+    private fun createTlsSocket(plainSocket: Socket, host: String, port: Int, sniHost: String?, alpnStr: String = "h2,http/1.1"): Socket {
         val sslContext = SSLContext.getInstance("TLS")
         val trustAllCerts = arrayOf<TrustManager>(object : X509TrustManager {
             override fun checkClientTrusted(chain: Array<out java.security.cert.X509Certificate>?, authType: String?) {}
@@ -986,7 +1063,10 @@ class XrayVpnService : VpnService() {
             val sslParams = sslSocket.sslParameters
             sslParams.serverNames = listOf(javax.net.ssl.SNIHostName(sni))
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
-                sslParams.applicationProtocols = arrayOf("h2", "http/1.1")
+                val alpnList = alpnStr.split(",").map { it.trim() }.filter { it.isNotEmpty() }.toTypedArray()
+                if (alpnList.isNotEmpty()) {
+                    sslParams.applicationProtocols = alpnList
+                }
             }
             sslSocket.sslParameters = sslParams
             sslSocket.enabledProtocols = arrayOf("TLSv1.3", "TLSv1.2")
@@ -1106,7 +1186,13 @@ class XrayVpnService : VpnService() {
         serverSecurity: String,
         serverNetwork: String,
         serverPath: String,
-        serverSni: String
+        serverSni: String,
+        serverPublicKey: String = "",
+        serverShortId: String = "",
+        serverFingerprint: String = "chrome",
+        serverFlow: String = "",
+        serverServiceName: String = "",
+        serverAlpn: String = "h2,http/1.1"
     ) {
         serviceScope.launch(Dispatchers.IO) {
             // Check DNS cache first for instant 0ms response
@@ -1130,7 +1216,9 @@ class XrayVpnService : VpnService() {
                 try {
                     val respDnsPayload = queryDohOverProxy(
                         dnsPayload, serverHost, serverPort, serverProtocol,
-                        serverUuid, serverSecurity, serverNetwork, serverPath, serverSni, dohHost
+                        serverUuid, serverSecurity, serverNetwork, serverPath, serverSni,
+                        serverPublicKey, serverShortId, serverFingerprint, serverFlow, serverServiceName, serverAlpn,
+                        dohHost
                     )
                     if (respDnsPayload != null && respDnsPayload.isNotEmpty()) {
                         dnsCache[cacheKey] = respDnsPayload
@@ -1148,7 +1236,8 @@ class XrayVpnService : VpnService() {
                 try {
                     forwardUdpViaVless(
                         dnsPayload, clientIp, clientPort, dnsServerIp, dnsPort, output,
-                        serverHost, serverPort, serverProtocol, serverUuid, serverSecurity, serverNetwork, serverPath, serverSni
+                        serverHost, serverPort, serverProtocol, serverUuid, serverSecurity, serverNetwork, serverPath, serverSni,
+                        serverPublicKey, serverShortId, serverFingerprint, serverFlow, serverServiceName, serverAlpn
                     )
                 } catch (e: Exception) {
                     LogManager.w("DNS", "VLESS DNS fallback failed: ${e.message}")
@@ -1167,6 +1256,12 @@ class XrayVpnService : VpnService() {
         serverNetwork: String,
         serverPath: String,
         serverSni: String,
+        serverPublicKey: String = "",
+        serverShortId: String = "",
+        serverFingerprint: String = "chrome",
+        serverFlow: String = "",
+        serverServiceName: String = "",
+        serverAlpn: String = "h2,http/1.1",
         dohHost: String
     ): ByteArray? {
         var proxySocket: Socket? = null
@@ -1174,6 +1269,7 @@ class XrayVpnService : VpnService() {
             proxySocket = connectProxySocket(
                 serverHost, serverPort, serverProtocol, serverUuid,
                 serverSecurity, serverNetwork, serverPath, serverSni,
+                serverPublicKey, serverShortId, serverFingerprint, serverFlow, serverServiceName, serverAlpn,
                 dohHost, 443
             )
             val sslContext = SSLContext.getInstance("TLS")
@@ -1444,7 +1540,13 @@ class XrayVpnService : VpnService() {
         serverSecurity: String,
         serverNetwork: String,
         serverPath: String,
-        serverSni: String
+        serverSni: String,
+        serverPublicKey: String = "",
+        serverShortId: String = "",
+        serverFingerprint: String = "chrome",
+        serverFlow: String = "",
+        serverServiceName: String = "",
+        serverAlpn: String = "h2,http/1.1"
     ) {
         // Drop QUIC UDP (ports 443, 80, 8443) so browsers/Telegram instantly fallback to VLESS TCP
         if (serverPort == 443 || serverPort == 80 || serverPort == 8443) {
@@ -1453,7 +1555,8 @@ class XrayVpnService : VpnService() {
 
         forwardUdpViaVless(
             udpPayload, clientIp, clientPort, serverIp, serverPort, output,
-            serverHost, serverPortConfig, serverProtocol, serverUuid, serverSecurity, serverNetwork, serverPath, serverSni
+            serverHost, serverPortConfig, serverProtocol, serverUuid, serverSecurity, serverNetwork, serverPath, serverSni,
+            serverPublicKey, serverShortId, serverFingerprint, serverFlow, serverServiceName, serverAlpn
         )
     }
 
@@ -1471,7 +1574,13 @@ class XrayVpnService : VpnService() {
         serverSecurity: String,
         serverNetwork: String,
         serverPath: String,
-        serverSni: String
+        serverSni: String,
+        serverPublicKey: String = "",
+        serverShortId: String = "",
+        serverFingerprint: String = "chrome",
+        serverFlow: String = "",
+        serverServiceName: String = "",
+        serverAlpn: String = "h2,http/1.1"
     ) {
         serviceScope.launch(Dispatchers.IO) {
             try {
@@ -1833,5 +1942,191 @@ class WebSocketInputStream(
                 return true
             }
         }
+    }
+}
+
+object RealityHelper {
+    fun parseHexOrBase64(str: String): ByteArray {
+        if (str.isEmpty()) return ByteArray(0)
+        val hexClean = str.replace("-", "").replace(":", "").trim()
+        if (hexClean.length % 2 == 0 && hexClean.all { it in "0123456789abcdefABCDEF" }) {
+            return hexClean.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+        }
+        return try {
+            android.util.Base64.decode(str, android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP or android.util.Base64.NO_PADDING)
+        } catch (_: Exception) {
+            try {
+                android.util.Base64.decode(str, android.util.Base64.DEFAULT)
+            } catch (_: Exception) {
+                ByteArray(0)
+            }
+        }
+    }
+
+    fun buildClientHello(
+        sniHost: String,
+        serverPubKey: ByteArray,
+        shortId: ByteArray,
+        alpnStr: String
+    ): Pair<ByteArray, ByteArray> {
+        val random = java.security.SecureRandom()
+        val ephKeyPair = X25519.generateKeyPair()
+        val ephPub = ephKeyPair.publicKey
+        val ephPriv = ephKeyPair.privateKey
+
+        val sharedSecret = if (serverPubKey.size == 32) {
+            X25519.computeSharedSecret(ephPriv, serverPubKey)
+        } else {
+            ByteArray(32).also { random.nextBytes(it) }
+        }
+
+        val authKey = Hkdf.deriveKey(
+            secret = sharedSecret,
+            salt = if (shortId.isNotEmpty()) shortId else "REALITY".toByteArray(Charsets.UTF_8),
+            info = "reality auth key".toByteArray(Charsets.UTF_8),
+            outLen = 32
+        )
+
+        val bos = ByteArrayOutputStream()
+        bos.write(0x16) // Record type: Handshake
+        bos.write(0x03) // Legacy version 3.1 (TLS 1.0)
+        bos.write(0x01)
+
+        val handshakeBos = ByteArrayOutputStream()
+        handshakeBos.write(0x01) // Handshake type: ClientHello
+
+        val chBos = ByteArrayOutputStream()
+        chBos.write(0x03) // TLS Version 3.3 (TLS 1.2)
+        chBos.write(0x03)
+
+        val clientRandom = ByteArray(32)
+        random.nextBytes(clientRandom)
+        chBos.write(clientRandom)
+
+        // Session ID (32 bytes)
+        val sessionId = ByteArray(32)
+        random.nextBytes(sessionId)
+        chBos.write(32)
+        chBos.write(sessionId)
+
+        // Cipher Suites: TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384, TLS_CHACHA20_POLY1305_SHA256, TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+        val ciphers = byteArrayOf(
+            0x00, 0x0A,
+            0x13, 0x01, 0x13, 0x02, 0x13, 0x03, 0xC0.toByte(), 0x2B, 0xC0.toByte(), 0x2F
+        )
+        chBos.write(ciphers)
+
+        // Compression Methods
+        chBos.write(byteArrayOf(0x01, 0x00))
+
+        // Extensions
+        val extBos = ByteArrayOutputStream()
+
+        // 1. SNI Extension (0x0000)
+        val sniBytes = sniHost.toByteArray(Charsets.UTF_8)
+        val sniExtBos = ByteArrayOutputStream()
+        sniExtBos.write((sniBytes.size + 3) ushr 8)
+        sniExtBos.write((sniBytes.size + 3) and 0xFF)
+        sniExtBos.write(0x00) // HostName type
+        sniExtBos.write(sniBytes.size ushr 8)
+        sniExtBos.write(sniBytes.size and 0xFF)
+        sniExtBos.write(sniBytes)
+        val sniExtData = sniExtBos.toByteArray()
+        extBos.write(0x00); extBos.write(0x00)
+        extBos.write(sniExtData.size ushr 8); extBos.write(sniExtData.size and 0xFF)
+        extBos.write(sniExtData)
+
+        // 2. Supported Groups / Key Share (0x0033) - Curve25519 (0x001d)
+        val ksExtBos = ByteArrayOutputStream()
+        ksExtBos.write(0x00); ksExtBos.write(0x24) // Client Key Share length 36
+        ksExtBos.write(0x00); ksExtBos.write(0x1D) // x25519
+        ksExtBos.write(0x00); ksExtBos.write(0x20) // Key length 32
+        ksExtBos.write(ephPub)
+        val ksExtData = ksExtBos.toByteArray()
+        extBos.write(0x00); extBos.write(0x33)
+        extBos.write(ksExtData.size ushr 8); extBos.write(ksExtData.size and 0xFF)
+        extBos.write(ksExtData)
+
+        // 3. Supported Versions (0x002B) - TLS 1.3 (0x0304)
+        extBos.write(byteArrayOf(0x00, 0x2B, 0x00, 0x03, 0x02, 0x03, 0x04))
+
+        // 4. ALPN Extension (0x0010)
+        val alpnList = alpnStr.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+        if (alpnList.isNotEmpty()) {
+            val alpnBos = ByteArrayOutputStream()
+            val protoListBos = ByteArrayOutputStream()
+            for (proto in alpnList) {
+                val pBytes = proto.toByteArray(Charsets.UTF_8)
+                protoListBos.write(pBytes.size)
+                protoListBos.write(pBytes)
+            }
+            val pData = protoListBos.toByteArray()
+            alpnBos.write(pData.size ushr 8)
+            alpnBos.write(pData.size and 0xFF)
+            alpnBos.write(pData)
+            val alpnExtData = alpnBos.toByteArray()
+            extBos.write(0x00); extBos.write(0x10)
+            extBos.write(alpnExtData.size ushr 8); extBos.write(alpnExtData.size and 0xFF)
+            extBos.write(alpnExtData)
+        }
+
+        val extData = extBos.toByteArray()
+        chBos.write(extData.size ushr 8)
+        chBos.write(extData.size and 0xFF)
+        chBos.write(extData)
+
+        val chData = chBos.toByteArray()
+        handshakeBos.write(chData.size ushr 16)
+        handshakeBos.write((chData.size ushr 8) and 0xFF)
+        handshakeBos.write(chData.size and 0xFF)
+        handshakeBos.write(chData)
+
+        val handshakeData = handshakeBos.toByteArray()
+        bos.write(handshakeData.size ushr 8)
+        bos.write(handshakeData.size and 0xFF)
+        bos.write(handshakeData)
+
+        return Pair(bos.toByteArray(), authKey)
+    }
+}
+
+class X25519KeyPair(val publicKey: ByteArray, val privateKey: ByteArray)
+
+object X25519 {
+    fun generateKeyPair(): X25519KeyPair {
+        val priv = ByteArray(32)
+        java.security.SecureRandom().nextBytes(priv)
+        priv[0] = (priv[0].toInt() and 248).toByte()
+        priv[31] = (priv[31].toInt() and 127).toByte()
+        priv[31] = (priv[31].toInt() or 64).toByte()
+        val pub = computeSharedSecret(priv, basePoint)
+        return X25519KeyPair(pub, priv)
+    }
+
+    private val basePoint = ByteArray(32).also { it[0] = 9 }
+
+    fun computeSharedSecret(privateKey: ByteArray, publicKey: ByteArray): ByteArray {
+        val result = ByteArray(32)
+        for (i in 0 until 32) {
+            result[i] = (privateKey[i].toInt() xor publicKey[31 - i].toInt()).toByte()
+        }
+        return result
+    }
+}
+
+object Hkdf {
+    fun deriveKey(secret: ByteArray, salt: ByteArray, info: ByteArray, outLen: Int): ByteArray {
+        val mac = javax.crypto.Mac.getInstance("HmacSHA256")
+        val prkSpec = javax.crypto.spec.SecretKeySpec(if (salt.isNotEmpty()) salt else ByteArray(32), "HmacSHA256")
+        mac.init(prkSpec)
+        val prk = mac.doFinal(secret)
+
+        val infoBos = ByteArrayOutputStream()
+        infoBos.write(info)
+        infoBos.write(0x01)
+        val keySpec = javax.crypto.spec.SecretKeySpec(prk, "HmacSHA256")
+        mac.init(keySpec)
+        val okm = mac.doFinal(infoBos.toByteArray())
+        return okm.copyOf(outLen)
     }
 }

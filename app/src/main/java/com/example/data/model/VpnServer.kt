@@ -17,6 +17,12 @@ data class VpnServer(
     val path: String = "",
     val sni: String = "",
     val alterId: Int = 0,         // for VMess
+    val publicKey: String = "",   // REALITY pbk
+    val shortId: String = "",     // REALITY sid
+    val fingerprint: String = "chrome", // fp: chrome, firefox, safari
+    val flow: String = "",        // flow: xtls-rprx-vision
+    val serviceName: String = "", // for gRPC / WS
+    val alpn: String = "h2,http/1.1",
     val groupName: String = "Default",
     val isPinned: Boolean = false,
     val latencyMs: Long = -1L,    // -1 = untested, -2 = error/timeout

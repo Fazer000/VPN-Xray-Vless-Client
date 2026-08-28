@@ -45,6 +45,12 @@ object ProtocolParser {
             val rawPath = uri.getQueryParameter("path") ?: ""
             val path = try { URLDecoder.decode(rawPath, "UTF-8") } catch (_: Exception) { rawPath }
             val sni = uri.getQueryParameter("sni") ?: uri.getQueryParameter("host") ?: host
+            val publicKey = uri.getQueryParameter("pbk") ?: uri.getQueryParameter("publicKey") ?: ""
+            val shortId = uri.getQueryParameter("sid") ?: uri.getQueryParameter("shortId") ?: ""
+            val fingerprint = uri.getQueryParameter("fp") ?: uri.getQueryParameter("fingerprint") ?: "chrome"
+            val flow = uri.getQueryParameter("flow") ?: ""
+            val serviceName = uri.getQueryParameter("serviceName") ?: uri.getQueryParameter("authority") ?: path
+            val alpn = uri.getQueryParameter("alpn") ?: "h2,http/1.1"
 
             val group = extractGroupFromName(name, defaultGroup)
 
@@ -60,6 +66,12 @@ object ProtocolParser {
                 network = network,
                 path = path,
                 sni = sni,
+                publicKey = publicKey,
+                shortId = shortId,
+                fingerprint = fingerprint,
+                flow = flow,
+                serviceName = serviceName,
+                alpn = alpn,
                 groupName = group,
                 rawLink = cleanLink
             )
@@ -522,6 +534,12 @@ object ProtocolParser {
         var path = ""
         var security = "none"
         var sni = host
+        var publicKey = ""
+        var shortId = ""
+        var fingerprint = "chrome"
+        var flow = ob.optString("flow", "")
+        var serviceName = ""
+        var alpn = "h2,http/1.1"
 
         val streamSettings = ob.optJSONObject("streamSettings")
         if (streamSettings != null) {
@@ -543,13 +561,21 @@ object ProtocolParser {
 
             val grpcSettings = streamSettings.optJSONObject("grpcSettings")
             if (grpcSettings != null) {
-                path = grpcSettings.optString("serviceName", "")
+                serviceName = grpcSettings.optString("serviceName", grpcSettings.optString("authority", path))
+                if (path.isEmpty()) path = serviceName
             }
 
             val tlsSettings = streamSettings.optJSONObject("tlsSettings")
             if (tlsSettings != null) {
                 val sName = tlsSettings.optString("serverName", tlsSettings.optString("sni", ""))
                 if (sName.isNotEmpty()) sni = sName
+                fingerprint = tlsSettings.optString("fingerprint", tlsSettings.optString("fp", "chrome"))
+                val alpnArr = tlsSettings.optJSONArray("alpn")
+                if (alpnArr != null && alpnArr.length() > 0) {
+                    val list = mutableListOf<String>()
+                    for (k in 0 until alpnArr.length()) list.add(alpnArr.getString(k))
+                    alpn = list.joinToString(",")
+                }
             }
 
             val realitySettings = streamSettings.optJSONObject("realitySettings")
@@ -557,6 +583,9 @@ object ProtocolParser {
                 security = "reality"
                 val sName = realitySettings.optString("serverName", realitySettings.optString("sni", ""))
                 if (sName.isNotEmpty()) sni = sName
+                publicKey = realitySettings.optString("publicKey", realitySettings.optString("pbk", ""))
+                shortId = realitySettings.optString("shortId", realitySettings.optString("sid", ""))
+                fingerprint = realitySettings.optString("fingerprint", realitySettings.optString("fp", "chrome"))
             }
 
             val hysteriaSettings = streamSettings.optJSONObject("hysteriaSettings") ?: streamSettings.optJSONObject("hy2Settings")
@@ -594,7 +623,7 @@ object ProtocolParser {
         }
 
         val group = extractGroupFromName(name, defaultGroup)
-        val rawLink = buildV2RayUri(protocol, uuid, host, port, network, security, path, sni, name)
+        val rawLink = buildV2RayUri(protocol, uuid, host, port, network, security, path, sni, name, publicKey, shortId, fingerprint, flow, serviceName, alpn)
 
         return VpnServer(
             id = generateId(ob.toString(), host, port, uuid),
@@ -608,6 +637,12 @@ object ProtocolParser {
             network = network,
             path = path,
             sni = sni,
+            publicKey = publicKey,
+            shortId = shortId,
+            fingerprint = fingerprint,
+            flow = flow,
+            serviceName = serviceName,
+            alpn = alpn,
             groupName = group,
             rawLink = rawLink
         )
@@ -622,15 +657,26 @@ object ProtocolParser {
         security: String,
         path: String,
         sni: String,
-        name: String
+        name: String,
+        publicKey: String = "",
+        shortId: String = "",
+        fingerprint: String = "chrome",
+        flow: String = "",
+        serviceName: String = "",
+        alpn: String = "h2,http/1.1"
     ): String {
         return try {
             val encPath = if (path.isNotEmpty()) java.net.URLEncoder.encode(path, "UTF-8") else ""
             val encSni = if (sni.isNotEmpty()) java.net.URLEncoder.encode(sni, "UTF-8") else ""
             val encName = java.net.URLEncoder.encode(name, "UTF-8")
+            val encPbk = if (publicKey.isNotEmpty()) java.net.URLEncoder.encode(publicKey, "UTF-8") else ""
+            val encSid = if (shortId.isNotEmpty()) java.net.URLEncoder.encode(shortId, "UTF-8") else ""
+            val encFp = java.net.URLEncoder.encode(fingerprint, "UTF-8")
+            val encFlow = java.net.URLEncoder.encode(flow, "UTF-8")
+            val encService = if (serviceName.isNotEmpty()) java.net.URLEncoder.encode(serviceName, "UTF-8") else ""
 
             when (protocol) {
-                VpnProtocol.VLESS -> "vless://$uuid@$host:$port?type=$network&security=$security&path=$encPath&sni=$encSni#$encName"
+                VpnProtocol.VLESS -> "vless://$uuid@$host:$port?type=$network&security=$security&path=$encPath&sni=$encSni&pbk=$encPbk&sid=$encSid&fp=$encFp&flow=$encFlow&serviceName=$encService#$encName"
                 VpnProtocol.VMESS -> {
                     val jsonObj = JSONObject().apply {
                         put("v", "2")
