@@ -701,15 +701,13 @@ class XrayVpnService : VpnService() {
 
     private fun protectSocket(socket: Socket) {
         val isProtected = protect(socket)
-        if (!isProtected) {
-            LogManager.w("XrayVpnService", "protect(socket) returned false!")
-        }
         try {
             val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
             val activeNetwork = cm?.activeNetwork
             activeNetwork?.bindSocket(socket)
-        } catch (e: Exception) {
-            LogManager.d("XrayVpnService", "activeNetwork.bindSocket error: ${e.message}")
+        } catch (_: Exception) {}
+        if (!isProtected && android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.M) {
+            LogManager.w("XrayVpnService", "protect(socket) returned false")
         }
     }
 
@@ -871,21 +869,25 @@ class XrayVpnService : VpnService() {
         rawSocket.keepAlive = true
         rawSocket.connect(resolveServerAddress(serverHost, serverPort), 7000)
 
-        val socket = if (serverSecurity.equals("reality", ignoreCase = true) || serverSecurity.equals("tls", ignoreCase = true) || serverPort == 443) {
+        val socket = if (serverSecurity.equals("reality", ignoreCase = true) || serverPublicKey.isNotEmpty()) {
+            val pbkBytes = RealityHelper.parseHexOrBase64(serverPublicKey)
+            val sidBytes = RealityHelper.parseHexOrBase64(serverShortId)
+            if (pbkBytes.isNotEmpty()) {
+                try {
+                    val (clientHelloPacket, _) = RealityHelper.buildClientHello(serverSni.ifEmpty { serverHost }, pbkBytes, sidBytes, serverAlpn)
+                    val out = rawSocket.getOutputStream()
+                    out.write(clientHelloPacket)
+                    out.flush()
+                } catch (e: Exception) {
+                    LogManager.w("VLESS", "REALITY Hello error: ${e.message}")
+                }
+            }
+            rawSocket
+        } else if (serverSecurity.equals("tls", ignoreCase = true) || serverPort == 443) {
             try {
                 createTlsSocket(rawSocket, serverHost, serverPort, serverSni, serverAlpn)
             } catch (e: Exception) {
-                LogManager.w("VLESS", "TLS Handshake failed, attempting raw socket: ${e.message}")
-                if (serverPublicKey.isNotEmpty()) {
-                    try {
-                        val pbkBytes = RealityHelper.parseHexOrBase64(serverPublicKey)
-                        val sidBytes = RealityHelper.parseHexOrBase64(serverShortId)
-                        val (clientHelloPacket, _) = RealityHelper.buildClientHello(serverSni.ifEmpty { serverHost }, pbkBytes, sidBytes, serverAlpn)
-                        val out = rawSocket.getOutputStream()
-                        out.write(clientHelloPacket)
-                        out.flush()
-                    } catch (_: Exception) {}
-                }
+                LogManager.w("VLESS", "TLS Handshake error: ${e.message}")
                 rawSocket
             }
         } else {
@@ -895,6 +897,9 @@ class XrayVpnService : VpnService() {
         val streamSocket = if (serverNetwork.equals("ws", ignoreCase = true)) {
             performWsUpgrade(socket, serverHost, serverPath, serverSni)
             WebSocketStreamSocket(socket)
+        } else if (serverNetwork.equals("xhttp", ignoreCase = true) || serverNetwork.equals("splithttp", ignoreCase = true) || serverNetwork.equals("http", ignoreCase = true) || serverNetwork.equals("h2", ignoreCase = true) || serverNetwork.equals("grpc", ignoreCase = true)) {
+            performHttpUpgrade(socket, serverHost, serverPath, serverSni)
+            socket
         } else {
             socket
         }
@@ -1163,6 +1168,24 @@ class XrayVpnService : VpnService() {
         return bos.toString("UTF-8")
     }
 
+    private fun performHttpUpgrade(socket: Socket, host: String, path: String, sni: String) {
+        try {
+            val cleanPath = try { java.net.URLDecoder.decode(path, "UTF-8") } catch (_: Exception) { path }
+            val httpPath = if (cleanPath.startsWith("/")) cleanPath else "/$cleanPath"
+            val httpHost = if (sni.isNotEmpty()) sni else host
+            val req = "POST $httpPath HTTP/1.1\r\n" +
+                    "Host: $httpHost\r\n" +
+                    "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36\r\n" +
+                    "Content-Type: application/octet-stream\r\n" +
+                    "Accept: */*\r\n" +
+                    "Connection: keep-alive\r\n\r\n"
+            socket.getOutputStream().write(req.toByteArray(Charsets.UTF_8))
+            socket.getOutputStream().flush()
+        } catch (e: Exception) {
+            LogManager.w("XrayVpnService", "HTTP upgrade write error: ${e.message}")
+        }
+    }
+
     private fun performWsUpgrade(socket: Socket, host: String, path: String, sni: String) {
         val cleanPath = try { java.net.URLDecoder.decode(path, "UTF-8") } catch (_: Exception) { path }
         val wsPath = if (cleanPath.startsWith("/")) cleanPath else "/$cleanPath"
@@ -1271,45 +1294,14 @@ class XrayVpnService : VpnService() {
                 return@launch
             }
 
-            val dohEndpoints = listOf(
-                "1.1.1.1",
-                "8.8.8.8",
-                "9.9.9.9",
-                "185.228.168.168"
-            )
-            var dohSuccess = false
-
-            for (dohHost in dohEndpoints) {
-                if (dohSuccess) break
-                try {
-                    val respDnsPayload = queryDohOverProxy(
-                        dnsPayload, serverHost, serverPort, serverProtocol,
-                        serverUuid, serverSecurity, serverNetwork, serverPath, serverSni,
-                        serverPublicKey, serverShortId, serverFingerprint, serverFlow, serverServiceName, serverAlpn,
-                        dohHost
-                    )
-                    if (respDnsPayload != null && respDnsPayload.isNotEmpty()) {
-                        dnsCache[cacheKey] = respDnsPayload
-                        sendUdpPacketToTun(output, dnsServerIp, dnsPort, clientIp, clientPort, respDnsPayload)
-                        dohSuccess = true
-                        LogManager.d("DNS", "Resolved DNS via Proxied DoH ($dohHost)")
-                    }
-                } catch (e: Exception) {
-                    LogManager.d("DNS", "Proxied DoH ($dohHost) error: ${e.message}")
-                }
-            }
-
-            // Fallback: Query standard UDP DNS via VLESS tunnel
-            if (!dohSuccess) {
-                try {
-                    forwardUdpViaVless(
-                        dnsPayload, clientIp, clientPort, dnsServerIp, dnsPort, output,
-                        serverHost, serverPort, serverProtocol, serverUuid, serverSecurity, serverNetwork, serverPath, serverSni,
-                        serverPublicKey, serverShortId, serverFingerprint, serverFlow, serverServiceName, serverAlpn
-                    )
-                } catch (e: Exception) {
-                    LogManager.w("DNS", "VLESS DNS fallback failed: ${e.message}")
-                }
+            try {
+                forwardUdpViaVless(
+                    dnsPayload, clientIp, clientPort, dnsServerIp, dnsPort, output,
+                    serverHost, serverPort, serverProtocol, serverUuid, serverSecurity, serverNetwork, serverPath, serverSni,
+                    serverPublicKey, serverShortId, serverFingerprint, serverFlow, serverServiceName, serverAlpn
+                )
+            } catch (e: Exception) {
+                LogManager.d("DNS", "VLESS DNS query failed: ${e.message}")
             }
         }
     }
@@ -1659,20 +1651,39 @@ class XrayVpnService : VpnService() {
                 rawSocket.soTimeout = 4000
                 rawSocket.connect(resolveServerAddress(serverHost, serverPortConfig), 5000)
 
-                val tlsSocket = if (serverSecurity.equals("tls", ignoreCase = true) || serverSecurity.equals("reality", ignoreCase = true) || serverPortConfig == 443) {
-                    createTlsSocket(rawSocket, serverHost, serverPortConfig, serverSni)
+                val socket = if (serverSecurity.equals("reality", ignoreCase = true) || serverPublicKey.isNotEmpty()) {
+                    val pbkBytes = RealityHelper.parseHexOrBase64(serverPublicKey)
+                    val sidBytes = RealityHelper.parseHexOrBase64(serverShortId)
+                    if (pbkBytes.isNotEmpty()) {
+                        try {
+                            val (clientHelloPacket, _) = RealityHelper.buildClientHello(serverSni.ifEmpty { serverHost }, pbkBytes, sidBytes, serverAlpn)
+                            val out = rawSocket.getOutputStream()
+                            out.write(clientHelloPacket)
+                            out.flush()
+                        } catch (_: Exception) {}
+                    }
+                    rawSocket
+                } else if (serverSecurity.equals("tls", ignoreCase = true) || serverPortConfig == 443) {
+                    try {
+                        createTlsSocket(rawSocket, serverHost, serverPortConfig, serverSni, serverAlpn)
+                    } catch (_: Exception) {
+                        rawSocket
+                    }
                 } else {
                     rawSocket
                 }
 
-                val socket = if (serverNetwork.equals("ws", ignoreCase = true)) {
-                    performWsUpgrade(tlsSocket, serverHost, serverPath, serverSni)
-                    WebSocketStreamSocket(tlsSocket)
+                val streamSocket = if (serverNetwork.equals("ws", ignoreCase = true)) {
+                    performWsUpgrade(socket, serverHost, serverPath, serverSni)
+                    WebSocketStreamSocket(socket)
+                } else if (serverNetwork.equals("xhttp", ignoreCase = true) || serverNetwork.equals("splithttp", ignoreCase = true) || serverNetwork.equals("http", ignoreCase = true) || serverNetwork.equals("h2", ignoreCase = true) || serverNetwork.equals("grpc", ignoreCase = true)) {
+                    performHttpUpgrade(socket, serverHost, serverPath, serverSni)
+                    socket
                 } else {
-                    tlsSocket
+                    socket
                 }
 
-                val out = socket.getOutputStream()
+                val out = streamSocket.getOutputStream()
                 val bos = ByteArrayOutputStream()
                 bos.write(0) // Version 0
                 bos.write(parseUuidToBytes(serverUuid))
@@ -1689,7 +1700,7 @@ class XrayVpnService : VpnService() {
                 out.flush()
 
                 // Read UDP response from VLESS server
-                val input = socket.getInputStream()
+                val input = streamSocket.getInputStream()
                 val respBuf = ByteArray(8192)
                 val read = input.read(respBuf)
                 if (read > 2) {
