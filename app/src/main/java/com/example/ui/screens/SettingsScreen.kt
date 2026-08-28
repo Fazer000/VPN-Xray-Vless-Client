@@ -138,6 +138,20 @@ fun SettingsScreen(
             // Section 2: Tunneling & Engine
             SettingsCategoryHeader("Tunneling & Engine")
 
+            var antiDpiEnabled by remember { mutableStateOf(true) }
+
+            SettingsToggleCard(
+                icon = Icons.Default.Security,
+                iconTint = CyberGreen,
+                title = "Anti-DPI / RU Region Stealth",
+                subtitle = "WS frame chunking, ALPN h2 & Chrome headers for Telegram photo upload stability",
+                checked = antiDpiEnabled,
+                onCheckedChange = {
+                    antiDpiEnabled = it
+                    LogManager.i("Settings", "Anti-DPI Stealth mode set to $it")
+                }
+            )
+
             SettingsItemCard(
                 icon = Icons.Default.AltRoute,
                 iconTint = CyberAmber,

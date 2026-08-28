@@ -180,14 +180,15 @@ class XrayVpnService : VpnService() {
 
         connectionJob = serviceScope.launch {
             try {
-                LogManager.i("TUN", "Building TUN interface (IP: 10.0.0.2/24, MTU: 1500, DNS: 1.1.1.1, 8.8.8.8)")
+                LogManager.i("TUN", "Building TUN interface (IP: 10.0.0.2/24, MTU: 1400, DNS: 1.1.1.1, 8.8.8.8, 9.9.9.9)")
                 val builder = Builder()
                     .setSession(serverName)
                     .addAddress("10.0.0.2", 24)
                     .addRoute("0.0.0.0", 0)
                     .addDnsServer("1.1.1.1")
                     .addDnsServer("8.8.8.8")
-                    .setMtu(1500)
+                    .addDnsServer("9.9.9.9")
+                    .setMtu(1400)
 
                 // Apply Per-App Split Tunneling rules
                 if (splitEnabled) {
@@ -863,9 +864,13 @@ class XrayVpnService : VpnService() {
         try {
             val sslParams = sslSocket.sslParameters
             sslParams.serverNames = listOf(javax.net.ssl.SNIHostName(sni))
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                sslParams.applicationProtocols = arrayOf("h2", "http/1.1")
+            }
             sslSocket.sslParameters = sslParams
+            sslSocket.enabledProtocols = arrayOf("TLSv1.3", "TLSv1.2")
         } catch (e: Exception) {
-            Log.w("XrayVpnService", "Failed to set SNI hostname: ${e.message}")
+            Log.w("XrayVpnService", "Failed to set SNI/ALPN: ${e.message}")
         }
 
         sslSocket.startHandshake()
@@ -901,7 +906,12 @@ class XrayVpnService : VpnService() {
                 "Connection: Upgrade\r\n" +
                 "Sec-WebSocket-Key: $key\r\n" +
                 "Sec-WebSocket-Version: 13\r\n" +
-                "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\r\n\r\n"
+                "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36\r\n" +
+                "Accept: */*\r\n" +
+                "Accept-Encoding: gzip, deflate, br\r\n" +
+                "Accept-Language: ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7\r\n" +
+                "Pragma: no-cache\r\n" +
+                "Cache-Control: no-cache\r\n\r\n"
 
         val out = socket.getOutputStream()
         out.write(req.toByteArray(Charsets.UTF_8))
@@ -970,39 +980,23 @@ class XrayVpnService : VpnService() {
         output: FileOutputStream
     ) {
         serviceScope.launch(Dispatchers.IO) {
+            val dohEndpoints = listOf(
+                "https://1.1.1.1/dns-query",
+                "https://dns.google/dns-query",
+                "https://dns.quad9.net/dns-query",
+                "https://dns.adguard-dns.com/dns-query"
+            )
             var dohSuccess = false
-            // Try Cloudflare DoH first
-            try {
-                val reqBody = dnsPayload.toRequestBody("application/dns-message".toMediaType())
-                val request = Request.Builder()
-                    .url("https://1.1.1.1/dns-query")
-                    .post(reqBody)
-                    .header("Accept", "application/dns-message")
-                    .header("User-Agent", "Mozilla/5.0")
-                    .build()
 
-                val response = okHttpClient.newCall(request).execute()
-                if (response.isSuccessful) {
-                    val respDnsPayload = response.body?.bytes()
-                    if (respDnsPayload != null && respDnsPayload.isNotEmpty()) {
-                        sendUdpPacketToTun(output, dnsServerIp, dnsPort, clientIp, clientPort, respDnsPayload)
-                        dohSuccess = true
-                        LogManager.d("DNS", "Resolved DNS via Cloudflare DoH (size: ${respDnsPayload.size} bytes)")
-                    }
-                }
-            } catch (e: Exception) {
-                LogManager.d("DNS", "Cloudflare DoH error: ${e.message}")
-            }
-
-            // Try Google DoH if Cloudflare fails
-            if (!dohSuccess) {
+            for (endpoint in dohEndpoints) {
+                if (dohSuccess) break
                 try {
                     val reqBody = dnsPayload.toRequestBody("application/dns-message".toMediaType())
                     val request = Request.Builder()
-                        .url("https://dns.google/dns-query")
+                        .url(endpoint)
                         .post(reqBody)
                         .header("Accept", "application/dns-message")
-                        .header("User-Agent", "Mozilla/5.0")
+                        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
                         .build()
 
                     val response = okHttpClient.newCall(request).execute()
@@ -1011,11 +1005,11 @@ class XrayVpnService : VpnService() {
                         if (respDnsPayload != null && respDnsPayload.isNotEmpty()) {
                             sendUdpPacketToTun(output, dnsServerIp, dnsPort, clientIp, clientPort, respDnsPayload)
                             dohSuccess = true
-                            LogManager.d("DNS", "Resolved DNS via Google DoH (size: ${respDnsPayload.size} bytes)")
+                            LogManager.d("DNS", "Resolved DNS via DoH ($endpoint)")
                         }
                     }
                 } catch (e: Exception) {
-                    LogManager.d("DNS", "Google DoH error: ${e.message}")
+                    LogManager.d("DNS", "DoH ($endpoint) error: ${e.message}")
                 }
             }
 
@@ -1403,6 +1397,16 @@ class WebSocketOutputStream(private val delegateOut: OutputStream) : OutputStrea
 
     override fun write(b: ByteArray, off: Int, len: Int) {
         if (len <= 0) return
+        val maxFrameSize = 4096
+        var bytesWritten = 0
+        while (bytesWritten < len) {
+            val chunkSize = Math.min(len - bytesWritten, maxFrameSize)
+            writeSingleFrame(b, off + bytesWritten, chunkSize)
+            bytesWritten += chunkSize
+        }
+    }
+
+    private fun writeSingleFrame(b: ByteArray, off: Int, len: Int) {
         val bos = ByteArrayOutputStream()
         bos.write(0x82) // FIN + Opcode 2 (Binary)
 
