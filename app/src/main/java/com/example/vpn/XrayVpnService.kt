@@ -41,6 +41,10 @@ import javax.net.ssl.SSLSocket
 import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
 
+import libv2ray.CoreCallbackHandler
+import libv2ray.CoreController
+import libv2ray.Libv2ray
+
 class XrayVpnService : VpnService() {
 
     enum class State {
@@ -90,6 +94,7 @@ class XrayVpnService : VpnService() {
     }
 
     private var vpnInterface: ParcelFileDescriptor? = null
+    private var activeCoreController: libv2ray.CoreController? = null
     private val coroutineExceptionHandler = CoroutineExceptionHandler { _, throwable ->
         Log.e("XrayVpnService", "Unhandled Exception in VPN Coroutine: ${throwable.localizedMessage}", throwable)
         _vpnState.value = State.DISCONNECTED
@@ -295,18 +300,89 @@ class XrayVpnService : VpnService() {
 
                 vpnInterface = pfd
                 _vpnState.value = State.CONNECTED
-                LogManager.i("Service", "VPN Tunnel established! Listening for IP traffic...")
+                LogManager.i("Service", "VPN Tunnel established! Starting Go Xray Core engine...")
                 updateNotification("Connected to $serverName")
 
-                // Start TUN packet handling loop for DNS queries, ICMP pings, and traffic relay
-                val input = FileInputStream(pfd.fileDescriptor)
-                val output = FileOutputStream(pfd.fileDescriptor)
-                startTunPacketRelay(
-                    input, output, serverHost, serverPort, serverProtocol, serverUuid,
-                    serverSecurity, serverNetwork, serverPath, serverSni,
-                    serverPublicKey, serverShortId, serverFingerprint, serverFlow,
-                    serverServiceName, serverAlpn
+                // Initialize Go Xray Core
+                try {
+                    val filesDir = applicationContext.filesDir.absolutePath
+                    libv2ray.Libv2ray.initCoreEnv(filesDir, filesDir)
+                } catch (e: Exception) {
+                    LogManager.w("XrayCore", "initCoreEnv info: ${e.message}")
+                }
+
+                val vpnServer = com.example.data.model.VpnServer(
+                    id = "active_node",
+                    subscriptionId = "manual",
+                    name = serverName,
+                    protocol = when (serverProtocol.uppercase()) {
+                        "VLESS" -> com.example.data.model.VpnProtocol.VLESS
+                        "VMESS" -> com.example.data.model.VpnProtocol.VMESS
+                        "TROJAN" -> com.example.data.model.VpnProtocol.TROJAN
+                        "SHADOWSOCKS", "SS" -> com.example.data.model.VpnProtocol.SHADOWSOCKS
+                        "SOCKS", "SOCKS5" -> com.example.data.model.VpnProtocol.SOCKS
+                        "HYSTERIA2", "HY2" -> com.example.data.model.VpnProtocol.HYSTERIA2
+                        else -> com.example.data.model.VpnProtocol.VLESS
+                    },
+                    host = serverHost,
+                    port = serverPort,
+                    uuid = serverUuid,
+                    security = serverSecurity,
+                    network = serverNetwork,
+                    path = serverPath,
+                    sni = serverSni,
+                    publicKey = serverPublicKey,
+                    shortId = serverShortId,
+                    fingerprint = serverFingerprint,
+                    flow = serverFlow,
+                    serviceName = serverServiceName,
+                    alpn = serverAlpn,
+                    groupName = "Active"
                 )
+
+                val configJson = com.example.util.XrayConfigGenerator.generateConfigJson(vpnServer)
+                LogManager.i("XrayCore", "Go Xray Core Config generated for $serverProtocol://$serverHost:$serverPort")
+
+                val callback = object : libv2ray.CoreCallbackHandler {
+                    override fun onEmitStatus(status: Long, msg: String?): Long {
+                        msg?.let { LogManager.i("XrayCore", it) }
+                        return 0
+                    }
+                    override fun shutdown(): Long {
+                        LogManager.i("XrayCore", "Go Xray Core shutdown signal")
+                        return 0
+                    }
+                    override fun startup(): Long {
+                        LogManager.i("XrayCore", "Go Xray Core startup success")
+                        return 0
+                    }
+                }
+
+                val coreController = libv2ray.Libv2ray.newCoreController(callback)
+                activeCoreController = coreController
+
+                // Periodic telemetry polling from Go Core
+                serviceScope.launch {
+                    while (isActive && _vpnState.value == State.CONNECTED) {
+                        delay(1000)
+                        try {
+                            val down = coreController.queryStats("proxy", "downlink")
+                            val up = coreController.queryStats("proxy", "uplink")
+                            if (down > 0) _rxBytes.value = down
+                            if (up > 0) _txBytes.value = up
+                        } catch (_: Exception) {}
+                    }
+                }
+
+                // Start Go Core event loop attached to Android TUN fd
+                withContext(Dispatchers.IO) {
+                    try {
+                        LogManager.i("XrayCore", "Starting Go Xray Core loop on TUN fd ${pfd.fd}...")
+                        coreController.startLoop(configJson, pfd.fd)
+                    } catch (e: java.lang.Exception) {
+                        LogManager.e("XrayCore", "Go Xray Core loop ended: ${e.message}")
+                    }
+                }
 
             } catch (e: Exception) {
                 Log.e("XrayVpnService", "VPN Error: ${e.message}", e)
@@ -320,6 +396,13 @@ class XrayVpnService : VpnService() {
     private fun stopVpnTunnel() {
         _vpnState.value = State.DISCONNECTING
         connectionJob?.cancel()
+        try {
+            activeCoreController?.stopLoop()
+        } catch (e: Exception) {
+            Log.e("XrayVpnService", "Error stopping Go Core: ${e.message}")
+        }
+        activeCoreController = null
+
         try {
             vpnInterface?.close()
         } catch (e: Exception) {
