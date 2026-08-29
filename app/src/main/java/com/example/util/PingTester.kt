@@ -32,16 +32,19 @@ object PingTester {
                     rawSocket.soTimeout = timeoutMs
                     rawSocket.connect(socketAddress, timeoutMs)
 
-                    val isAlive = when (server.security.lowercase()) {
-                        "reality" -> probeReality(rawSocket, server, timeoutMs)
-                        "tls" -> probeTls(rawSocket, server, timeoutMs)
-                        else -> {
-                            if (server.network.equals("ws", ignoreCase = true)) {
-                                probeWebSocket(rawSocket, server, timeoutMs)
-                            } else {
-                                probeTcp(rawSocket, server, timeoutMs)
-                            }
-                        }
+                    val isTls = server.security.equals("reality", ignoreCase = true) ||
+                            server.security.equals("tls", ignoreCase = true) ||
+                            server.publicKey.isNotEmpty() ||
+                            server.port == 443
+
+                    val isAlive = if (isTls) {
+                        probeTls(rawSocket, server, timeoutMs)
+                    } else if (server.network.equals("ws", ignoreCase = true)) {
+                        probeWebSocket(rawSocket, server, timeoutMs)
+                    } else if (server.network.equals("xhttp", ignoreCase = true) || server.network.equals("splithttp", ignoreCase = true) || server.network.equals("http", ignoreCase = true) || server.network.equals("h2", ignoreCase = true) || server.network.equals("grpc", ignoreCase = true)) {
+                        probeHttp(rawSocket, server, timeoutMs)
+                    } else {
+                        probeTcp(rawSocket, server, timeoutMs)
                     }
 
                     if (!isAlive) {

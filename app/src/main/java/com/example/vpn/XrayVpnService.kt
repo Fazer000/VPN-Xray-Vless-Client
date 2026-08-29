@@ -869,21 +869,12 @@ class XrayVpnService : VpnService() {
         rawSocket.keepAlive = true
         rawSocket.connect(resolveServerAddress(serverHost, serverPort), 7000)
 
-        val socket = if (serverSecurity.equals("reality", ignoreCase = true) || serverPublicKey.isNotEmpty()) {
-            val pbkBytes = RealityHelper.parseHexOrBase64(serverPublicKey)
-            val sidBytes = RealityHelper.parseHexOrBase64(serverShortId)
-            if (pbkBytes.isNotEmpty()) {
-                try {
-                    val (clientHelloPacket, _) = RealityHelper.buildClientHello(serverSni.ifEmpty { serverHost }, pbkBytes, sidBytes, serverAlpn)
-                    val out = rawSocket.getOutputStream()
-                    out.write(clientHelloPacket)
-                    out.flush()
-                } catch (e: Exception) {
-                    LogManager.w("VLESS", "REALITY Hello error: ${e.message}")
-                }
-            }
-            rawSocket
-        } else if (serverSecurity.equals("tls", ignoreCase = true) || serverPort == 443) {
+        val isTls = serverSecurity.equals("reality", ignoreCase = true) ||
+                serverSecurity.equals("tls", ignoreCase = true) ||
+                serverPublicKey.isNotEmpty() ||
+                serverPort == 443
+
+        val socket = if (isTls) {
             try {
                 createTlsSocket(rawSocket, serverHost, serverPort, serverSni, serverAlpn)
             } catch (e: Exception) {
@@ -1651,19 +1642,12 @@ class XrayVpnService : VpnService() {
                 rawSocket.soTimeout = 4000
                 rawSocket.connect(resolveServerAddress(serverHost, serverPortConfig), 5000)
 
-                val socket = if (serverSecurity.equals("reality", ignoreCase = true) || serverPublicKey.isNotEmpty()) {
-                    val pbkBytes = RealityHelper.parseHexOrBase64(serverPublicKey)
-                    val sidBytes = RealityHelper.parseHexOrBase64(serverShortId)
-                    if (pbkBytes.isNotEmpty()) {
-                        try {
-                            val (clientHelloPacket, _) = RealityHelper.buildClientHello(serverSni.ifEmpty { serverHost }, pbkBytes, sidBytes, serverAlpn)
-                            val out = rawSocket.getOutputStream()
-                            out.write(clientHelloPacket)
-                            out.flush()
-                        } catch (_: Exception) {}
-                    }
-                    rawSocket
-                } else if (serverSecurity.equals("tls", ignoreCase = true) || serverPortConfig == 443) {
+                val isTls = serverSecurity.equals("reality", ignoreCase = true) ||
+                        serverSecurity.equals("tls", ignoreCase = true) ||
+                        serverPublicKey.isNotEmpty() ||
+                        serverPortConfig == 443
+
+                val socket = if (isTls) {
                     try {
                         createTlsSocket(rawSocket, serverHost, serverPortConfig, serverSni, serverAlpn)
                     } catch (_: Exception) {
