@@ -7,19 +7,37 @@ import org.json.JSONObject
 
 object XrayConfigGenerator {
 
+    private fun findFreePort(defaultPort: Int): Int {
+        return try {
+            java.net.ServerSocket(defaultPort).use { socket ->
+                socket.localPort
+            }
+        } catch (_: Exception) {
+            try {
+                java.net.ServerSocket(0).use { socket ->
+                    socket.localPort
+                }
+            } catch (_: Exception) {
+                defaultPort
+            }
+        }
+    }
+
     fun generateConfigJson(server: VpnServer, socksPort: Int = 10808, httpPort: Int = 10809): String {
+        val actualSocksPort = findFreePort(socksPort)
+        val actualHttpPort = findFreePort(httpPort)
         val root = JSONObject()
 
         // 1. Log section
         val log = JSONObject().apply {
-            put("loglevel", "warning")
+            put("loglevel", "info")
         }
         root.put("log", log)
 
         // 2. Inbounds (SOCKS5 & HTTP local proxies)
         val inbounds = JSONArray()
         val socksIn = JSONObject().apply {
-            put("port", socksPort)
+            put("port", actualSocksPort)
             put("listen", "127.0.0.1")
             put("protocol", "socks")
             put("settings", JSONObject().apply {
@@ -31,7 +49,7 @@ object XrayConfigGenerator {
         inbounds.put(socksIn)
 
         val httpIn = JSONObject().apply {
-            put("port", httpPort)
+            put("port", actualHttpPort)
             put("listen", "127.0.0.1")
             put("protocol", "http")
             put("settings", JSONObject())
@@ -125,7 +143,13 @@ object XrayConfigGenerator {
         // StreamSettings
         val streamSettings = JSONObject()
         val net = server.network.lowercase().ifEmpty { "tcp" }
-        val sec = server.security.lowercase().ifEmpty { if (server.port == 443) "tls" else "none" }
+        val sec = if (server.publicKey.isNotEmpty() || server.security.equals("reality", ignoreCase = true)) {
+            "reality"
+        } else if (server.security.equals("tls", ignoreCase = true) || server.port == 443) {
+            "tls"
+        } else {
+            "none"
+        }
 
         streamSettings.put("network", net)
         streamSettings.put("security", sec)

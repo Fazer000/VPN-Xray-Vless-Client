@@ -36,8 +36,9 @@ fun SettingsScreen(
     onNavigateToSubscriptions: () -> Unit
 ) {
     val context = LocalContext.current
-    var dnsProvider by remember { mutableStateOf("Cloudflare DoH (1.1.1.1)") }
-    var enableIpv6 by remember { mutableStateOf(false) }
+    val dnsProvider by viewModel.dnsProvider.collectAsState()
+    val enableIpv6 by viewModel.enableIpv6.collectAsState()
+    val antiDpiEnabled by viewModel.antiDpiEnabled.collectAsState()
     var showDnsDialog by remember { mutableStateOf(false) }
 
     val dnsOptions = listOf("Cloudflare DoH (1.1.1.1)", "Google DoH (8.8.8.8)", "Quad9 DoH (9.9.9.9)", "System Native DNS")
@@ -56,7 +57,7 @@ fun SettingsScreen(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clickable {
-                                    dnsProvider = option
+                                    viewModel.setDnsProvider(option)
                                     showDnsDialog = false
                                     LogManager.i("Settings", "DNS Provider updated to: $option")
                                 }
@@ -138,8 +139,6 @@ fun SettingsScreen(
             // Section 2: Tunneling & Engine
             SettingsCategoryHeader("Tunneling & Engine")
 
-            var antiDpiEnabled by remember { mutableStateOf(true) }
-
             SettingsToggleCard(
                 icon = Icons.Default.Security,
                 iconTint = CyberGreen,
@@ -147,7 +146,7 @@ fun SettingsScreen(
                 subtitle = "WS frame chunking, ALPN h2 & Chrome headers for Telegram photo upload stability",
                 checked = antiDpiEnabled,
                 onCheckedChange = {
-                    antiDpiEnabled = it
+                    viewModel.setAntiDpiEnabled(it)
                     LogManager.i("Settings", "Anti-DPI Stealth mode set to $it")
                 }
             )
@@ -177,7 +176,7 @@ fun SettingsScreen(
                 subtitle = "Route IPv6 network packets through TUN interface",
                 checked = enableIpv6,
                 onCheckedChange = {
-                    enableIpv6 = it
+                    viewModel.setEnableIpv6(it)
                     LogManager.i("Settings", "IPv6 tunneling changed to $it")
                 }
             )

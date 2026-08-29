@@ -75,6 +75,16 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     private val _splitTunnelMode = MutableStateFlow(prefs.getString("split_tunnel_mode", "PROXY") ?: "PROXY")
     val splitTunnelMode: StateFlow<String> = _splitTunnelMode.asStateFlow() // "PROXY" or "BYPASS"
 
+    // Engine & DNS Settings States
+    private val _dnsProvider = MutableStateFlow(prefs.getString("dns_provider", "Cloudflare DoH (1.1.1.1)") ?: "Cloudflare DoH (1.1.1.1)")
+    val dnsProvider: StateFlow<String> = _dnsProvider.asStateFlow()
+
+    private val _enableIpv6 = MutableStateFlow(prefs.getBoolean("enable_ipv6", false))
+    val enableIpv6: StateFlow<Boolean> = _enableIpv6.asStateFlow()
+
+    private val _antiDpiEnabled = MutableStateFlow(prefs.getBoolean("anti_dpi_enabled", true))
+    val antiDpiEnabled: StateFlow<Boolean> = _antiDpiEnabled.asStateFlow()
+
     // VPN Service State Flows
     val vpnState = XrayVpnService.vpnState
     val rxBytes = XrayVpnService.rxBytes
@@ -217,6 +227,21 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         prefs.edit().putString("split_tunnel_mode", mode).apply()
     }
 
+    fun setDnsProvider(provider: String) {
+        _dnsProvider.value = provider
+        prefs.edit().putString("dns_provider", provider).apply()
+    }
+
+    fun setEnableIpv6(enabled: Boolean) {
+        _enableIpv6.value = enabled
+        prefs.edit().putBoolean("enable_ipv6", enabled).apply()
+    }
+
+    fun setAntiDpiEnabled(enabled: Boolean) {
+        _antiDpiEnabled.value = enabled
+        prefs.edit().putBoolean("anti_dpi_enabled", enabled).apply()
+    }
+
     fun toggleAppProxied(packageName: String, isProxied: Boolean) {
         viewModelScope.launch {
             repository.updateAppRule(packageName, isProxied)
@@ -286,6 +311,9 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
             intent.putExtra(XrayVpnService.EXTRA_SERVER_RAW_LINK, server.rawLink)
             intent.putExtra(XrayVpnService.EXTRA_SPLIT_TUNNEL_ENABLED, _splitTunnelEnabled.value)
             intent.putExtra(XrayVpnService.EXTRA_SPLIT_MODE, _splitTunnelMode.value)
+            intent.putExtra(XrayVpnService.EXTRA_DNS_PROVIDER, _dnsProvider.value)
+            intent.putExtra(XrayVpnService.EXTRA_ENABLE_IPV6, _enableIpv6.value)
+            intent.putExtra(XrayVpnService.EXTRA_ANTI_DPI_ENABLED, _antiDpiEnabled.value)
         }
 
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {

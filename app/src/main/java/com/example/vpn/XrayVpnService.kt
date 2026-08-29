@@ -76,6 +76,9 @@ class XrayVpnService : VpnService() {
         const val EXTRA_SERVER_RAW_LINK = "extra_server_raw_link"
         const val EXTRA_SPLIT_TUNNEL_ENABLED = "extra_split_tunnel_enabled"
         const val EXTRA_SPLIT_MODE = "extra_split_mode" // "PROXY" or "BYPASS"
+        const val EXTRA_DNS_PROVIDER = "extra_dns_provider"
+        const val EXTRA_ENABLE_IPV6 = "extra_enable_ipv6"
+        const val EXTRA_ANTI_DPI_ENABLED = "extra_anti_dpi_enabled"
 
         private const val NOTIFICATION_ID = 1001
         private const val CHANNEL_ID = "xray_vpn_service_channel"
@@ -154,13 +157,19 @@ class XrayVpnService : VpnService() {
                 val splitEnabled = intent.getBooleanExtra(EXTRA_SPLIT_TUNNEL_ENABLED, false)
                 val splitMode = intent.getStringExtra(EXTRA_SPLIT_MODE) ?: "PROXY"
 
+                val prefs = getSharedPreferences("xray_vpn_prefs", Context.MODE_PRIVATE)
+                val dnsProvider = intent.getStringExtra(EXTRA_DNS_PROVIDER) ?: prefs.getString("dns_provider", "Cloudflare DoH (1.1.1.1)") ?: "Cloudflare DoH (1.1.1.1)"
+                val enableIpv6 = intent.getBooleanExtra(EXTRA_ENABLE_IPV6, prefs.getBoolean("enable_ipv6", false))
+                val antiDpiEnabled = intent.getBooleanExtra(EXTRA_ANTI_DPI_ENABLED, prefs.getBoolean("anti_dpi_enabled", true))
+
                 _activeServerName.value = serverName
                 safeStartForeground(buildNotification("Connecting to $serverName..."))
                 startVpnTunnel(
                     serverName, serverHost, serverPort, serverProtocol, serverUuid,
                     serverSecurity, serverNetwork, serverPath, serverSni,
                     serverPublicKey, serverShortId, serverFingerprint, serverFlow,
-                    serverServiceName, serverAlpn, splitEnabled, splitMode
+                    serverServiceName, serverAlpn, splitEnabled, splitMode,
+                    dnsProvider, enableIpv6, antiDpiEnabled
                 )
             }
             ACTION_DISCONNECT -> {
@@ -199,9 +208,22 @@ class XrayVpnService : VpnService() {
         serverServiceName: String = "",
         serverAlpn: String = "h2,http/1.1",
         splitEnabled: Boolean = false,
-        splitMode: String = "PROXY"
+        splitMode: String = "PROXY",
+        dnsProvider: String = "Cloudflare DoH (1.1.1.1)",
+        enableIpv6: Boolean = false,
+        antiDpiEnabled: Boolean = true
     ) {
         connectionJob?.cancel()
+        try {
+            activeCoreController?.stopLoop()
+        } catch (_: Exception) {}
+        activeCoreController = null
+
+        try {
+            vpnInterface?.close()
+        } catch (_: Exception) {}
+        vpnInterface = null
+
         _vpnState.value = State.CONNECTING
         totalRxBytes.set(0L)
         totalTxBytes.set(0L)
@@ -213,7 +235,7 @@ class XrayVpnService : VpnService() {
 
         connectionJob = serviceScope.launch {
             try {
-                LogManager.i("TUN", "Building TUN interface (IP: 10.0.0.2/24, MTU: 1400, DNS: 1.1.1.1, 8.8.8.8, 9.9.9.9)")
+                LogManager.i("TUN", "Building TUN interface (IP: 10.0.0.2/24, MTU: 1400, DNS Provider: $dnsProvider, IPv6: $enableIpv6, AntiDPI: $antiDpiEnabled)")
 
                 val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
                 val activeNetwork = cm?.activeNetwork
@@ -233,13 +255,45 @@ class XrayVpnService : VpnService() {
                     .setSession(serverName)
                     .addAddress("10.0.0.2", 24)
                     .addRoute("0.0.0.0", 0)
-                    .addAddress("fd00:1:2::2", 128)
-                    .addRoute("::", 0)
-                    .addDnsServer("1.1.1.1")
-                    .addDnsServer("8.8.8.8")
-                    .addDnsServer("9.9.9.9")
-                    .addDnsServer("2606:4700:4700::1111")
-                    .setMtu(1400)
+
+                if (enableIpv6) {
+                    try {
+                        builder.addAddress("fd00:1:2::2", 64)
+                        builder.addRoute("::", 0)
+                    } catch (e: Exception) {
+                        LogManager.w("TUN", "Could not add IPv6 address/route: ${e.message}")
+                    }
+                }
+
+                when {
+                    dnsProvider.contains("Cloudflare", ignoreCase = true) -> {
+                        builder.addDnsServer("1.1.1.1")
+                        builder.addDnsServer("1.0.0.1")
+                        if (enableIpv6) {
+                            builder.addDnsServer("2606:4700:4700::1111")
+                        }
+                    }
+                    dnsProvider.contains("Google", ignoreCase = true) -> {
+                        builder.addDnsServer("8.8.8.8")
+                        builder.addDnsServer("8.8.4.4")
+                        if (enableIpv6) {
+                            builder.addDnsServer("2001:4860:4860::8888")
+                        }
+                    }
+                    dnsProvider.contains("Quad9", ignoreCase = true) -> {
+                        builder.addDnsServer("9.9.9.9")
+                        builder.addDnsServer("149.112.112.112")
+                        if (enableIpv6) {
+                            builder.addDnsServer("2620:fe::fe")
+                        }
+                    }
+                    else -> {
+                        builder.addDnsServer("1.1.1.1")
+                        builder.addDnsServer("8.8.8.8")
+                    }
+                }
+
+                builder.setMtu(1400)
 
                 // Apply Per-App Split Tunneling rules
                 if (splitEnabled) {
@@ -303,9 +357,20 @@ class XrayVpnService : VpnService() {
                 LogManager.i("Service", "VPN Tunnel established! Starting Go Xray Core engine...")
                 updateNotification("Connected to $serverName")
 
-                // Initialize Go Xray Core
+                // Initialize Go Xray Core & Assets
                 try {
-                    val filesDir = applicationContext.filesDir.absolutePath
+                    val filesDirFile = applicationContext.filesDir
+                    listOf("geoip.dat", "geosite.dat").forEach { filename ->
+                        val dest = java.io.File(filesDirFile, filename)
+                        if (!dest.exists() || dest.length() == 0L) {
+                            applicationContext.assets.open(filename).use { input ->
+                                java.io.FileOutputStream(dest).use { output ->
+                                    input.copyTo(output)
+                                }
+                            }
+                        }
+                    }
+                    val filesDir = filesDirFile.absolutePath
                     libv2ray.Libv2ray.initCoreEnv(filesDir, filesDir)
                 } catch (e: Exception) {
                     LogManager.w("XrayCore", "initCoreEnv info: ${e.message}")
@@ -380,8 +445,13 @@ class XrayVpnService : VpnService() {
                         LogManager.i("XrayCore", "Starting Go Xray Core loop on TUN fd ${pfd.fd}...")
                         coreController.startLoop(configJson, pfd.fd)
                     } catch (e: java.lang.Exception) {
-                        LogManager.e("XrayCore", "Go Xray Core loop ended: ${e.message}")
+                        LogManager.e("XrayCore", "Go Xray Core loop error: ${e.message}")
                     }
+                }
+
+                if (_vpnState.value == State.CONNECTED) {
+                    LogManager.i("XrayCore", "Go Xray Core loop exited. Shutting down VPN tunnel...")
+                    stopVpnTunnel()
                 }
 
             } catch (e: Exception) {
