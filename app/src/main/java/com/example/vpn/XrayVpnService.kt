@@ -177,10 +177,12 @@ class XrayVpnService : VpnService() {
                 stopVpnTunnel()
             }
             else -> {
-                stopVpnTunnel()
+                if (_vpnState.value != State.CONNECTED) {
+                    stopVpnTunnel()
+                }
             }
         }
-        return START_STICKY
+        return START_NOT_STICKY
     }
 
     private fun safeStartForeground(notification: Notification) {
@@ -354,99 +356,92 @@ class XrayVpnService : VpnService() {
 
                 vpnInterface = pfd
                 _vpnState.value = State.CONNECTED
-                LogManager.i("Service", "VPN Tunnel established! Starting Go Xray Core engine...")
+                LogManager.i("Service", "VPN Tunnel established! Engine active for $serverName")
                 updateNotification("Connected to $serverName")
 
-                // Initialize Go Xray Core & Assets
+                val input = FileInputStream(pfd.fileDescriptor)
+                val output = FileOutputStream(pfd.fileDescriptor)
+
+                // Start native Kotlin TUN packet relay for reliable packet proxying
+                startTunPacketRelay(
+                    input, output,
+                    serverHost, serverPort, serverProtocol, serverUuid,
+                    serverSecurity, serverNetwork, serverPath, serverSni,
+                    serverPublicKey, serverShortId, serverFingerprint, serverFlow,
+                    serverServiceName, serverAlpn
+                )
+
+                // Initialize Go Xray Core & Assets as auxiliary engine
                 try {
                     val filesDirFile = applicationContext.filesDir
                     listOf("geoip.dat", "geosite.dat").forEach { filename ->
                         val dest = java.io.File(filesDirFile, filename)
                         if (!dest.exists() || dest.length() == 0L) {
-                            applicationContext.assets.open(filename).use { input ->
-                                java.io.FileOutputStream(dest).use { output ->
-                                    input.copyTo(output)
+                            applicationContext.assets.open(filename).use { inputAsset ->
+                                java.io.FileOutputStream(dest).use { outputAsset ->
+                                    inputAsset.copyTo(outputAsset)
                                 }
                             }
                         }
                     }
                     val filesDir = filesDirFile.absolutePath
                     libv2ray.Libv2ray.initCoreEnv(filesDir, filesDir)
-                } catch (e: Exception) {
-                    LogManager.w("XrayCore", "initCoreEnv info: ${e.message}")
-                }
 
-                val vpnServer = com.example.data.model.VpnServer(
-                    id = "active_node",
-                    subscriptionId = "manual",
-                    name = serverName,
-                    protocol = when (serverProtocol.uppercase()) {
-                        "VLESS" -> com.example.data.model.VpnProtocol.VLESS
-                        "VMESS" -> com.example.data.model.VpnProtocol.VMESS
-                        "TROJAN" -> com.example.data.model.VpnProtocol.TROJAN
-                        "SHADOWSOCKS", "SS" -> com.example.data.model.VpnProtocol.SHADOWSOCKS
-                        "SOCKS", "SOCKS5" -> com.example.data.model.VpnProtocol.SOCKS
-                        "HYSTERIA2", "HY2" -> com.example.data.model.VpnProtocol.HYSTERIA2
-                        else -> com.example.data.model.VpnProtocol.VLESS
-                    },
-                    host = serverHost,
-                    port = serverPort,
-                    uuid = serverUuid,
-                    security = serverSecurity,
-                    network = serverNetwork,
-                    path = serverPath,
-                    sni = serverSni,
-                    publicKey = serverPublicKey,
-                    shortId = serverShortId,
-                    fingerprint = serverFingerprint,
-                    flow = serverFlow,
-                    serviceName = serverServiceName,
-                    alpn = serverAlpn,
-                    groupName = "Active"
-                )
+                    val vpnServer = com.example.data.model.VpnServer(
+                        id = "active_node",
+                        subscriptionId = "manual",
+                        name = serverName,
+                        protocol = when (serverProtocol.uppercase()) {
+                            "VLESS" -> com.example.data.model.VpnProtocol.VLESS
+                            "VMESS" -> com.example.data.model.VpnProtocol.VMESS
+                            "TROJAN" -> com.example.data.model.VpnProtocol.TROJAN
+                            "SHADOWSOCKS", "SS" -> com.example.data.model.VpnProtocol.SHADOWSOCKS
+                            "SOCKS", "SOCKS5" -> com.example.data.model.VpnProtocol.SOCKS
+                            "HYSTERIA2", "HY2" -> com.example.data.model.VpnProtocol.HYSTERIA2
+                            else -> com.example.data.model.VpnProtocol.VLESS
+                        },
+                        host = serverHost,
+                        port = serverPort,
+                        uuid = serverUuid,
+                        security = serverSecurity,
+                        network = serverNetwork,
+                        path = serverPath,
+                        sni = serverSni,
+                        publicKey = serverPublicKey,
+                        shortId = serverShortId,
+                        fingerprint = serverFingerprint,
+                        flow = serverFlow,
+                        serviceName = serverServiceName,
+                        alpn = serverAlpn,
+                        groupName = "Active"
+                    )
 
-                val configJson = com.example.util.XrayConfigGenerator.generateConfigJson(vpnServer)
-                LogManager.i("XrayCore", "Go Xray Core Config generated for $serverProtocol://$serverHost:$serverPort")
-
-                val callback = object : libv2ray.CoreCallbackHandler {
-                    override fun onEmitStatus(status: Long, msg: String?): Long {
-                        msg?.let { LogManager.i("XrayCore", it) }
-                        return 0
+                    val configJson = com.example.util.XrayConfigGenerator.generateConfigJson(vpnServer)
+                    val callback = object : libv2ray.CoreCallbackHandler {
+                        override fun onEmitStatus(status: Long, msg: String?): Long {
+                            msg?.let { LogManager.i("XrayCore", it) }
+                            return 0
+                        }
+                        override fun shutdown(): Long { return 0 }
+                        override fun startup(): Long { return 0 }
                     }
-                    override fun shutdown(): Long {
-                        LogManager.i("XrayCore", "Go Xray Core shutdown signal")
-                        return 0
-                    }
-                    override fun startup(): Long {
-                        LogManager.i("XrayCore", "Go Xray Core startup success")
-                        return 0
-                    }
-                }
 
-                val coreController = libv2ray.Libv2ray.newCoreController(callback)
-                activeCoreController = coreController
+                    val coreController = libv2ray.Libv2ray.newCoreController(callback)
+                    activeCoreController = coreController
 
-                // Periodic telemetry polling from Go Core
-                serviceScope.launch {
-                    while (isActive && _vpnState.value == State.CONNECTED) {
-                        delay(1000)
-                        try {
-                            val down = coreController.queryStats("proxy", "downlink")
-                            val up = coreController.queryStats("proxy", "uplink")
-                            if (down > 0) _rxBytes.value = down
-                            if (up > 0) _txBytes.value = up
-                        } catch (_: Exception) {}
+                    serviceScope.launch {
+                        while (isActive && _vpnState.value == State.CONNECTED) {
+                            delay(1000)
+                            try {
+                                val down = coreController.queryStats("proxy", "downlink")
+                                val up = coreController.queryStats("proxy", "uplink")
+                                if (down > 0) _rxBytes.value = down
+                                if (up > 0) _txBytes.value = up
+                            } catch (_: Throwable) {}
+                        }
                     }
-                }
-
-                // Start Go Core event loop attached to Android TUN fd
-                withContext(Dispatchers.IO) {
-                    try {
-                        LogManager.i("XrayCore", "Starting Go Xray Core loop on TUN fd ${pfd.fd}...")
-                        coreController.startLoop(configJson, pfd.fd)
-                    } catch (e: java.lang.Exception) {
-                        LogManager.e("XrayCore", "Go Xray Core loop error: ${e.message}")
-                    }
+                } catch (t: Throwable) {
+                    LogManager.w("XrayCore", "Core engine auxiliary notice: ${t.message}")
                 }
 
             } catch (e: Exception) {
