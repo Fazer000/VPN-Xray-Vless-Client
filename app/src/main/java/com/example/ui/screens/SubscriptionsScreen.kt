@@ -316,7 +316,7 @@ fun SubscriptionsScreen(
     }
 
     if (showAddDialog) {
-        AddSubscriptionDialog(
+        AddSubscriptionBottomSheet(
             onDismiss = { showAddDialog = false },
             onAdd = { url, name ->
                 viewModel.addSubscription(url, name)
@@ -495,8 +495,9 @@ fun SubscriptionCard(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AddSubscriptionDialog(
+fun AddSubscriptionBottomSheet(
     onDismiss: () -> Unit,
     onAdd: (url: String, name: String) -> Unit
 ) {
@@ -505,66 +506,88 @@ fun AddSubscriptionDialog(
 
     val sampleUrl = "https://raw.githubusercontent.com/v2fly/fakedata/main/sub.txt"
 
-    AlertDialog(
+    ModalBottomSheet(
         onDismissRequest = onDismiss,
         containerColor = CyberSurface,
-        title = {
-            Text("Добавить подписку V2Ray", color = TextPrimary, fontWeight = FontWeight.Bold)
-        },
-        text = {
-            Column {
-                Text("URL подписки, V2Ray ссылка или JSON-конфиг:", fontSize = 13.sp, color = TextSecondary)
-                Spacer(modifier = Modifier.height(6.dp))
-                OutlinedTextField(
-                    value = urlText,
-                    onValueChange = { urlText = it },
-                    placeholder = { Text("https://... или vless:// или JSON", fontSize = 12.sp, color = TextSecondary) },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("add_sub_url_input"),
-                    shape = RoundedCornerShape(10.dp)
+        scrimColor = Color.Black.copy(alpha = 0.65f),
+        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+        dragHandle = { BottomSheetDefaults.DragHandle(color = TextSecondary.copy(alpha = 0.4f)) }
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 24.dp, vertical = 12.dp)
+        ) {
+            Text("Добавить подписку V2Ray", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 20.sp)
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Text("URL подписки, V2Ray ссылка или JSON-конфиг:", fontSize = 13.sp, color = TextSecondary)
+            Spacer(modifier = Modifier.height(6.dp))
+            OutlinedTextField(
+                value = urlText,
+                onValueChange = { urlText = it },
+                placeholder = { Text("https://... или vless:// или JSON", fontSize = 12.sp, color = TextSecondary) },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("add_sub_url_input"),
+                shape = RoundedCornerShape(12.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = CyberCyan,
+                    unfocusedBorderColor = CyberSurfaceVariant
                 )
+            )
 
-                Spacer(modifier = Modifier.height(6.dp))
+            Spacer(modifier = Modifier.height(6.dp))
 
-                TextButton(
-                    onClick = {
-                        urlText = sampleUrl
-                        if (nameText.isBlank()) nameText = "V2Ray Demo Feed"
-                    },
-                    modifier = Modifier.align(Alignment.End)
-                ) {
-                    Text("Тестовая ссылка", fontSize = 12.sp, color = CyberCyan)
-                }
-
-                Spacer(modifier = Modifier.height(6.dp))
-
-                Text("Название (необязательно):", fontSize = 13.sp, color = TextSecondary)
-                Spacer(modifier = Modifier.height(4.dp))
-                OutlinedTextField(
-                    value = nameText,
-                    onValueChange = { nameText = it },
-                    placeholder = { Text("Например: Моя подписка", fontSize = 12.sp, color = TextSecondary) },
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(10.dp)
-                )
-            }
-        },
-        confirmButton = {
-            Button(
-                onClick = { onAdd(urlText, nameText) },
-                enabled = urlText.isNotBlank(),
-                colors = ButtonDefaults.buttonColors(containerColor = CyberCyan, contentColor = Color.Black),
-                modifier = Modifier.testTag("confirm_add_sub_btn")
+            TextButton(
+                onClick = {
+                    urlText = sampleUrl
+                    if (nameText.isBlank()) nameText = "Тестовая подписка V2Ray"
+                },
+                modifier = Modifier.align(Alignment.End)
             ) {
-                Text("Загрузить и добавить", fontWeight = FontWeight.Bold)
+                Text("Вставить демо-ссылку", fontSize = 12.sp, color = CyberCyan)
             }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Отмена", color = TextSecondary)
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            Text("Название подписки (необязательно):", fontSize = 13.sp, color = TextSecondary)
+            Spacer(modifier = Modifier.height(6.dp))
+            OutlinedTextField(
+                value = nameText,
+                onValueChange = { nameText = it },
+                placeholder = { Text("Например: Моя подписка", fontSize = 12.sp, color = TextSecondary) },
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = CyberCyan,
+                    unfocusedBorderColor = CyberSurfaceVariant
+                )
+            )
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End
+            ) {
+                TextButton(onClick = onDismiss) {
+                    Text("Отмена", color = TextSecondary)
+                }
+                Spacer(modifier = Modifier.width(12.dp))
+                Button(
+                    onClick = { onAdd(urlText, nameText) },
+                    enabled = urlText.isNotBlank(),
+                    colors = ButtonDefaults.buttonColors(containerColor = CyberCyan, contentColor = Color.Black),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.testTag("confirm_add_sub_btn")
+                ) {
+                    Text("Загрузить и добавить", fontWeight = FontWeight.Bold)
+                }
             }
+
+            Spacer(modifier = Modifier.height(16.dp))
         }
-    )
+    }
 }
 

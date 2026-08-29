@@ -66,13 +66,13 @@ fun SplitTunnelingScreen(
         ) {
             Column {
                 Text(
-                    text = "Split Tunneling",
+                    text = "Разделение трафика",
                     fontSize = 22.sp,
                     fontWeight = FontWeight.Bold,
                     color = TextPrimary
                 )
                 Text(
-                    text = "Control per-app traffic routing",
+                    text = "Маршрутизация приложений",
                     fontSize = 12.sp,
                     color = TextSecondary
                 )
@@ -102,7 +102,7 @@ fun SplitTunnelingScreen(
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Text(
-                    text = "ROUTING MODE",
+                    text = "РЕЖИМ МАРШРУТИЗАЦИИ",
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
                     color = CyberCyan
@@ -116,7 +116,7 @@ fun SplitTunnelingScreen(
                     FilterChip(
                         selected = mode == "PROXY",
                         onClick = { viewModel.setSplitTunnelMode("PROXY") },
-                        label = { Text("Proxy Selected ($proxiedCount)") },
+                        label = { Text("Прокси ($proxiedCount)") },
                         leadingIcon = {
                             Icon(Icons.Default.VpnKey, contentDescription = null, modifier = Modifier.size(16.dp))
                         },
@@ -133,7 +133,7 @@ fun SplitTunnelingScreen(
                     FilterChip(
                         selected = mode == "BYPASS",
                         onClick = { viewModel.setSplitTunnelMode("BYPASS") },
-                        label = { Text("Bypass Selected") },
+                        label = { Text("В обход VPN") },
                         leadingIcon = {
                             Icon(Icons.Default.CallSplit, contentDescription = null, modifier = Modifier.size(16.dp))
                         },
@@ -159,8 +159,8 @@ fun SplitTunnelingScreen(
             modifier = Modifier
                 .fillMaxWidth()
                 .testTag("app_search_input"),
-            placeholder = { Text("Search installed applications...", color = TextSecondary) },
-            leadingIcon = { Icon(Icons.Default.Search, contentDescription = "Search", tint = TextSecondary) },
+            placeholder = { Text("Поиск установленных приложений...", color = TextSecondary) },
+            leadingIcon = { Icon(Icons.Default.Search, contentDescription = "Поиск", tint = TextSecondary) },
             singleLine = true,
             shape = RoundedCornerShape(14.dp),
             colors = OutlinedTextFieldDefaults.colors(
@@ -191,17 +191,17 @@ fun SplitTunnelingScreen(
                 Tab(
                     selected = selectedTab == 0,
                     onClick = { selectedTab = 0 },
-                    text = { Text("All (${appRules.size})", fontSize = 12.sp) }
+                    text = { Text("Все (${appRules.size})", fontSize = 12.sp) }
                 )
                 Tab(
                     selected = selectedTab == 1,
                     onClick = { selectedTab = 1 },
-                    text = { Text("User", fontSize = 12.sp) }
+                    text = { Text("Польз.", fontSize = 12.sp) }
                 )
                 Tab(
                     selected = selectedTab == 2,
                     onClick = { selectedTab = 2 },
-                    text = { Text("System", fontSize = 12.sp) }
+                    text = { Text("Системные", fontSize = 12.sp) }
                 )
             }
 

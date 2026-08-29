@@ -44,43 +44,56 @@ fun SettingsScreen(
     val dnsOptions = listOf("Cloudflare DoH (1.1.1.1)", "Google DoH (8.8.8.8)", "Quad9 DoH (9.9.9.9)", "System Native DNS")
 
     if (showDnsDialog) {
-        AlertDialog(
+        ModalBottomSheet(
             onDismissRequest = { showDnsDialog = false },
             containerColor = CyberSurface,
-            title = {
-                Text("Select DNS Provider", color = TextPrimary, fontWeight = FontWeight.Bold)
-            },
-            text = {
-                Column {
-                    dnsOptions.forEach { option ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    viewModel.setDnsProvider(option)
-                                    showDnsDialog = false
-                                    LogManager.i("Settings", "DNS Provider updated to: $option")
-                                }
-                                .padding(vertical = 12.dp, horizontal = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            RadioButton(
-                                selected = dnsProvider == option,
-                                onClick = null,
-                                colors = RadioButtonDefaults.colors(selectedColor = CyberCyan)
-                            )
-                            Spacer(modifier = Modifier.width(12.dp))
-                            Text(text = option, color = TextPrimary, fontSize = 15.sp)
-                        }
+            scrimColor = androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.65f),
+            shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+            dragHandle = { BottomSheetDefaults.DragHandle(color = TextSecondary.copy(alpha = 0.4f)) }
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 24.dp, vertical = 12.dp)
+            ) {
+                Text("Выберите DNS провайдер", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 20.sp)
+                Spacer(modifier = Modifier.height(16.dp))
+
+                dnsOptions.forEach { option ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable {
+                                viewModel.setDnsProvider(option)
+                                showDnsDialog = false
+                                LogManager.i("Settings", "DNS Provider updated to: $option")
+                            }
+                            .padding(vertical = 12.dp, horizontal = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RadioButton(
+                            selected = dnsProvider == option,
+                            onClick = null,
+                            colors = RadioButtonDefaults.colors(selectedColor = CyberCyan)
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text(text = option, color = TextPrimary, fontSize = 15.sp)
                     }
                 }
-            },
-            confirmButton = {
-                TextButton(onClick = { showDnsDialog = false }) {
-                    Text("Close", color = CyberCyan)
+
+                Spacer(modifier = Modifier.height(16.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End
+                ) {
+                    TextButton(onClick = { showDnsDialog = false }) {
+                        Text("Закрыть", color = CyberCyan)
+                    }
                 }
+                Spacer(modifier = Modifier.height(16.dp))
             }
-        )
+        }
     }
 
     Scaffold(
@@ -89,12 +102,12 @@ fun SettingsScreen(
             TopAppBar(
                 navigationIcon = {
                     IconButton(onClick = onBack, modifier = Modifier.testTag("settings_back_btn")) {
-                        Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = TextPrimary)
+                        Icon(Icons.Default.ArrowBack, contentDescription = "Назад", tint = TextPrimary)
                     }
                 },
                 title = {
                     Text(
-                        text = "Settings & Core",
+                        text = "Настройки и ядро",
                         fontSize = 20.sp,
                         fontWeight = FontWeight.Bold,
                         color = TextPrimary
@@ -113,13 +126,13 @@ fun SettingsScreen(
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             // Section 1: Diagnostics & Terminal
-            SettingsCategoryHeader("Diagnostics & Logs")
+            SettingsCategoryHeader("Диагностика и логи")
 
             SettingsItemCard(
                 icon = Icons.Default.Terminal,
                 iconTint = CyberCyan,
-                title = "Core Logs & Terminal",
-                subtitle = "View live VLESS connection, TLS handshakes & DoH DNS logs",
+                title = "Логи ядра и терминал",
+                subtitle = "Просмотр VLESS подключений, TLS хэндшейков и DoH DNS",
                 testTag = "settings_logs_btn",
                 onClick = onNavigateToLogs
             )
@@ -127,23 +140,23 @@ fun SettingsScreen(
             SettingsItemCard(
                 icon = Icons.Default.Speed,
                 iconTint = CyberGreen,
-                title = "Ping All Servers",
-                subtitle = "Check TCP socket connection latency for all servers",
+                title = "Проверить пинг всех серверов",
+                subtitle = "Измерение задержки TCP сокетов для всех узлов",
                 testTag = "settings_ping_btn",
                 onClick = {
                     viewModel.pingAllServers()
-                    Toast.makeText(context, "Testing latency for all servers...", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, "Измерение задержки всех серверов...", Toast.LENGTH_SHORT).show()
                 }
             )
 
             // Section 2: Tunneling & Engine
-            SettingsCategoryHeader("Tunneling & Engine")
+            SettingsCategoryHeader("Тоннелирование и движок")
 
             SettingsToggleCard(
                 icon = Icons.Default.Security,
                 iconTint = CyberGreen,
-                title = "Anti-DPI / RU Region Stealth",
-                subtitle = "WS frame chunking, ALPN h2 & Chrome headers for Telegram photo upload stability",
+                title = "Защита Anti-DPI (Обход блокировок)",
+                subtitle = "Дробление WS фреймов, ALPN h2 и Chrome заголовки для устойчивости",
                 checked = antiDpiEnabled,
                 onCheckedChange = {
                     viewModel.setAntiDpiEnabled(it)
@@ -154,8 +167,8 @@ fun SettingsScreen(
             SettingsItemCard(
                 icon = Icons.Default.AltRoute,
                 iconTint = CyberAmber,
-                title = "Split Tunneling",
-                subtitle = "Select applications to bypass or route through VPN tunnel",
+                title = "Разделение трафика (Split Tunneling)",
+                subtitle = "Выбор приложений для обхода или направленности в VPN",
                 testTag = "settings_split_btn",
                 onClick = onNavigateToSplitTunnel
             )
@@ -163,7 +176,7 @@ fun SettingsScreen(
             SettingsItemCard(
                 icon = Icons.Default.Dns,
                 iconTint = CyberCyan,
-                title = "DNS Resolver Protocol",
+                title = "Протокол DNS резолвера",
                 subtitle = dnsProvider,
                 testTag = "settings_dns_btn",
                 onClick = { showDnsDialog = true }
@@ -172,8 +185,8 @@ fun SettingsScreen(
             SettingsToggleCard(
                 icon = Icons.Default.Router,
                 iconTint = CyberPurple,
-                title = "IPv6 Traffic Tunneling",
-                subtitle = "Route IPv6 network packets through TUN interface",
+                title = "Тоннелирование IPv6 трафика",
+                subtitle = "Перенаправление IPv6 пакетов через TUN интерфейс",
                 checked = enableIpv6,
                 onCheckedChange = {
                     viewModel.setEnableIpv6(it)
@@ -182,13 +195,13 @@ fun SettingsScreen(
             )
 
             // Section 3: Subscriptions & Updates
-            SettingsCategoryHeader("Subscriptions & Maintenance")
+            SettingsCategoryHeader("Подписки и обслуживание")
 
             SettingsItemCard(
                 icon = Icons.Default.RssFeed,
                 iconTint = CyberCyan,
-                title = "V2Ray Subscriptions",
-                subtitle = "Manage VLESS / Trojan / SOCKS5 auto-update URLs",
+                title = "Подписки V2Ray",
+                subtitle = "Управление ссылками автообновления VLESS / Trojan / SOCKS5",
                 testTag = "settings_subscriptions_btn",
                 onClick = onNavigateToSubscriptions
             )
@@ -196,8 +209,8 @@ fun SettingsScreen(
             SettingsItemCard(
                 icon = Icons.Default.SystemUpdate,
                 iconTint = CyberGreen,
-                title = "Check for Updates",
-                subtitle = "Query latest release version and updates",
+                title = "Проверить обновления",
+                subtitle = "Запрос актуальной версии приложения",
                 testTag = "settings_update_btn",
                 onClick = { viewModel.checkForAppUpdates() }
             )
@@ -205,12 +218,12 @@ fun SettingsScreen(
             SettingsItemCard(
                 icon = Icons.Default.DeleteSweep,
                 iconTint = CyberRed,
-                title = "Clear Diagnostic Logs",
-                subtitle = "Wipe cached terminal logs buffer",
+                title = "Очистить логи диагностики",
+                subtitle = "Очистка кэшированного буфера терминала",
                 testTag = "settings_clear_logs_btn",
                 onClick = {
                     LogManager.clear()
-                    Toast.makeText(context, "Log buffer cleared", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, "Буфер логов очищен", Toast.LENGTH_SHORT).show()
                 }
             )
 
@@ -239,13 +252,13 @@ fun SettingsScreen(
                     Spacer(modifier = Modifier.width(14.dp))
                     Column {
                         Text(
-                            text = "Xray Flow VPN v1.0.4",
+                            text = "XrayFlow VPN v1.0.4",
                             fontSize = 15.sp,
                             fontWeight = FontWeight.Bold,
                             color = TextPrimary
                         )
                         Text(
-                            text = "Kotlin TUN Engine • VLESS / Trojan / WS / TLS",
+                            text = "Движок Kotlin TUN • VLESS / Trojan / WS / TLS",
                             fontSize = 12.sp,
                             color = TextSecondary
                         )

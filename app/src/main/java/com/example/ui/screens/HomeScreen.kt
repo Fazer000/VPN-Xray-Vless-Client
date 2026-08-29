@@ -27,7 +27,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.model.VpnServer
-import com.example.ui.components.UpdateDialog
 import com.example.ui.theme.*
 import com.example.ui.viewmodel.VpnViewModel
 import com.example.vpn.XrayVpnService
@@ -46,10 +45,6 @@ fun HomeScreen(
     val txBytes by viewModel.txBytes.collectAsState()
     val splitTunnelEnabled by viewModel.splitTunnelEnabled.collectAsState()
 
-    val updateInfo by viewModel.updateInfo.collectAsState()
-    val isCheckingUpdate by viewModel.isCheckingUpdate.collectAsState()
-    val downloadState by viewModel.downloadState.collectAsState()
-
     val vpnPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
     ) { result ->
@@ -57,15 +52,6 @@ fun HomeScreen(
             viewModel.toggleVpnConnection(context)
         }
     }
-
-    UpdateDialog(
-        updateInfo = updateInfo,
-        isChecking = isCheckingUpdate,
-        downloadState = downloadState,
-        onCheckUpdate = { viewModel.checkForAppUpdates() },
-        onDownloadAndUpdate = { url -> viewModel.startDownloadAndUpdate(url) },
-        onDismiss = { viewModel.dismissUpdateDialog() }
-    )
 
     val isConnected = vpnState == XrayVpnService.State.CONNECTED
     val isConnecting = vpnState == XrayVpnService.State.CONNECTING
@@ -98,13 +84,13 @@ fun HomeScreen(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
                     imageVector = Icons.Default.Shield,
-                    contentDescription = "App Logo",
+                    contentDescription = "Логотип XrayFlow",
                     tint = CyberCyan,
                     modifier = Modifier.size(28.dp)
                 )
                 Spacer(modifier = Modifier.width(10.dp))
                 Text(
-                    text = "Xray flow",
+                    text = "XrayFlow",
                     fontSize = 22.sp,
                     fontWeight = FontWeight.Bold,
                     color = TextPrimary
@@ -117,19 +103,11 @@ fun HomeScreen(
                     onClick = { viewModel.checkForAppUpdates() },
                     modifier = Modifier.testTag("home_update_btn")
                 ) {
-                    if (isCheckingUpdate) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(20.dp),
-                            color = CyberCyan,
-                            strokeWidth = 2.dp
-                        )
-                    } else {
-                        Icon(
-                            imageVector = Icons.Default.SystemUpdate,
-                            contentDescription = "Check for Updates",
-                            tint = CyberCyan
-                        )
-                    }
+                    Icon(
+                        imageVector = Icons.Default.SystemUpdate,
+                        contentDescription = "Проверить обновления",
+                        tint = CyberCyan
+                    )
                 }
 
                 IconButton(
@@ -138,7 +116,7 @@ fun HomeScreen(
                 ) {
                     Icon(
                         imageVector = Icons.Default.Settings,
-                        contentDescription = "Settings",
+                        contentDescription = "Настройки",
                         tint = CyberCyan
                     )
                 }
@@ -159,13 +137,13 @@ fun HomeScreen(
                     ) {
                         Icon(
                             imageVector = Icons.Default.AltRoute,
-                            contentDescription = "Split Tunneling",
+                            contentDescription = "Разделение трафика",
                             tint = if (splitTunnelEnabled) CyberCyan else TextSecondary,
                             modifier = Modifier.size(16.dp)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = if (splitTunnelEnabled) "Split: ON" else "Split: OFF",
+                            text = if (splitTunnelEnabled) "Обход: Вкл" else "Обход: Выкл",
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Medium,
                             color = if (splitTunnelEnabled) CyberCyan else TextSecondary
@@ -213,9 +191,9 @@ fun HomeScreen(
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
                     text = when {
-                        isConnected -> "PROTECTED & ENCRYPTED"
-                        isConnecting -> "ESTABLISHING XRAY TUNNEL..."
-                        else -> "DISCONNECTED"
+                        isConnected -> "ЗАЩИЩЕНО И ЗАШИФРОВАНО"
+                        isConnecting -> "ПОДКЛЮЧЕНИЕ К XRAY..."
+                        else -> "ОТКЛЮЧЕНО"
                     },
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Bold,
@@ -282,13 +260,13 @@ fun HomeScreen(
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Icon(
                         imageVector = Icons.Default.PowerSettingsNew,
-                        contentDescription = "Connect Toggle",
+                        contentDescription = "Кнопка подключения",
                         tint = if (isConnected) Color.White else TextPrimary,
                         modifier = Modifier.size(56.dp)
                     )
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
-                        text = if (isConnected) "STOP" else if (isConnecting) "WAIT" else "START",
+                        text = if (isConnected) "СТОП" else if (isConnecting) "ЖДИТЕ" else "СТАРТ",
                         fontSize = 14.sp,
                         fontWeight = FontWeight.Bold,
                         color = if (isConnected) Color.White else TextPrimary
@@ -317,13 +295,13 @@ fun HomeScreen(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
                         imageVector = Icons.Default.ArrowDownward,
-                        contentDescription = "Download Traffic",
+                        contentDescription = "Входящий трафик",
                         tint = CyberGreen,
                         modifier = Modifier.size(20.dp)
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Column {
-                        Text("Download", fontSize = 11.sp, color = TextSecondary)
+                        Text("Загрузка", fontSize = 11.sp, color = TextSecondary)
                         Text(
                             text = formatBytes(rxBytes),
                             fontSize = 14.sp,
@@ -344,13 +322,13 @@ fun HomeScreen(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
                         imageVector = Icons.Default.ArrowUpward,
-                        contentDescription = "Upload Traffic",
+                        contentDescription = "Исходящий трафик",
                         tint = CyberCyan,
                         modifier = Modifier.size(20.dp)
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Column {
-                        Text("Upload", fontSize = 11.sp, color = TextSecondary)
+                        Text("Отправка", fontSize = 11.sp, color = TextSecondary)
                         Text(
                             text = formatBytes(txBytes),
                             fontSize = 14.sp,
@@ -391,7 +369,7 @@ fun HomeScreen(
                         Box(contentAlignment = Alignment.Center) {
                             Icon(
                                 imageVector = Icons.Default.Dns,
-                                contentDescription = "Server",
+                                contentDescription = "Сервер",
                                 tint = CyberPurple,
                                 modifier = Modifier.size(22.dp)
                             )
@@ -402,7 +380,7 @@ fun HomeScreen(
 
                     Column {
                         Text(
-                            text = selectedServer?.name ?: "No Server Selected",
+                            text = selectedServer?.name ?: "Сервер не выбран",
                             fontSize = 15.sp,
                             fontWeight = FontWeight.SemiBold,
                             color = TextPrimary,
@@ -410,7 +388,7 @@ fun HomeScreen(
                         )
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(
-                                text = selectedServer?.let { "${it.protocol} • ${it.groupName}" } ?: "Tap to choose a node",
+                                text = selectedServer?.let { "${it.protocol} • ${it.groupName}" } ?: "Нажмите, чтобы выбрать узел",
                                 fontSize = 12.sp,
                                 color = TextSecondary
                             )
@@ -425,7 +403,7 @@ fun HomeScreen(
                     }
                     Icon(
                         imageVector = Icons.Default.ChevronRight,
-                        contentDescription = "Select Server",
+                        contentDescription = "Выбрать сервер",
                         tint = TextSecondary
                     )
                 }

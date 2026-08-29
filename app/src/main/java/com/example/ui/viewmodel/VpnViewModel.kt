@@ -35,13 +35,13 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
 
     // Room Flows
     val servers: StateFlow<List<VpnServer>> = repository.allServers
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     val subscriptions: StateFlow<List<Subscription>> = repository.allSubscriptions
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     val appRules: StateFlow<List<AppRule>> = repository.allAppRules
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     // Selected Server State
     private val _selectedServerId = MutableStateFlow(prefs.getString("selected_server_id", null))
@@ -49,7 +49,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
 
     val selectedServer: StateFlow<VpnServer?> = combine(servers, selectedServerId) { serverList, id ->
         serverList.find { it.id == id } ?: serverList.firstOrNull()
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     // Ping Testing States
     private val _isPinging = MutableStateFlow(false)
@@ -285,12 +285,16 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
 
     fun toggleVpnConnection(context: Context) {
         val currentState = vpnState.value
-        val server = selectedServer.value ?: return
+        val server = selectedServer.value ?: servers.value.firstOrNull()
 
         val intent = Intent(context, XrayVpnService::class.java)
         if (currentState == XrayVpnService.State.CONNECTED || currentState == XrayVpnService.State.CONNECTING) {
             intent.action = XrayVpnService.ACTION_DISCONNECT
         } else {
+            if (server == null) {
+                android.widget.Toast.makeText(context, "Выберите или добавьте VPN сервер!", android.widget.Toast.LENGTH_LONG).show()
+                return
+            }
             intent.action = XrayVpnService.ACTION_CONNECT
             intent.putExtra(XrayVpnService.EXTRA_SERVER_ID, server.id)
             intent.putExtra(XrayVpnService.EXTRA_SERVER_NAME, server.name)

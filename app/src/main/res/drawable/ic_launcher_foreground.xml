@@ -1,8 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
-<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
-    <item
-        android:width="66dp"
-        android:height="66dp"
-        android:drawable="@drawable/xray_flow_icon_1787845544893"
-        android:gravity="center" />
-</layer-list>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#00E5FF"
+        android:pathData="M54,20 L30,30 V50 C30,68 40.5,82.5 54,88 C67.5,82.5 78,68 78,50 V30 L54,20 Z" />
+    <path
+        android:fillColor="#0B0F19"
+        android:pathData="M56,34 L44,52 H54 L52,70 L64,52 H54 L56,34 Z" />
+</vector>

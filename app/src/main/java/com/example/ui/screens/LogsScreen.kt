@@ -74,13 +74,13 @@ fun LogsScreen(
                 title = {
                     Column {
                         Text(
-                            text = "Core Logs & Diagnostics",
+                            text = "Логи и диагностика ядра",
                             fontSize = 18.sp,
                             fontWeight = FontWeight.Bold,
                             color = TextPrimary
                         )
                         Text(
-                            text = "${filteredLogs.size} entries",
+                            text = "Записей: ${filteredLogs.size}",
                             fontSize = 12.sp,
                             color = TextSecondary
                         )
@@ -93,7 +93,7 @@ fun LogsScreen(
                     ) {
                         Icon(
                             imageVector = if (autoScroll) Icons.Default.VerticalAlignBottom else Icons.Default.Pause,
-                            contentDescription = "Auto Scroll",
+                            contentDescription = "Автопрокрутка",
                             tint = if (autoScroll) CyberCyan else TextSecondary
                         )
                     }
@@ -103,13 +103,13 @@ fun LogsScreen(
                             val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                             val clip = ClipData.newPlainText("Xray Logs", allLogsText)
                             clipboard.setPrimaryClip(clip)
-                            Toast.makeText(context, "Logs copied to clipboard", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, "Логи скопированы в буфер обмена", Toast.LENGTH_SHORT).show()
                         },
                         modifier = Modifier.testTag("copy_logs_btn")
                     ) {
                         Icon(
                             imageVector = Icons.Default.ContentCopy,
-                            contentDescription = "Copy Logs",
+                            contentDescription = "Копировать логи",
                             tint = CyberCyan
                         )
                     }
@@ -119,7 +119,7 @@ fun LogsScreen(
                     ) {
                         Icon(
                             imageVector = Icons.Default.Delete,
-                            contentDescription = "Clear Logs",
+                            contentDescription = "Очистить логи",
                             tint = CyberRed
                         )
                     }
@@ -141,7 +141,7 @@ fun LogsScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .testTag("logs_search_input"),
-                placeholder = { Text("Filter logs...", color = TextSecondary) },
+                placeholder = { Text("Фильтр логов...", color = TextSecondary) },
                 leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = TextSecondary) },
                 trailingIcon = {
                     if (searchQuery.isNotEmpty()) {
@@ -172,7 +172,7 @@ fun LogsScreen(
                 FilterChip(
                     selected = selectedFilter == null,
                     onClick = { selectedFilter = null },
-                    label = { Text("ALL", fontSize = 11.sp) },
+                    label = { Text("ВСЕ", fontSize = 11.sp) },
                     colors = FilterChipDefaults.filterChipColors(
                         selectedContainerColor = CyberCyan.copy(alpha = 0.2f),
                         selectedLabelColor = CyberCyan,
@@ -183,7 +183,7 @@ fun LogsScreen(
                 FilterChip(
                     selected = selectedFilter == LogLevel.INFO,
                     onClick = { selectedFilter = if (selectedFilter == LogLevel.INFO) null else LogLevel.INFO },
-                    label = { Text("INFO", fontSize = 11.sp) },
+                    label = { Text("ИНФО", fontSize = 11.sp) },
                     colors = FilterChipDefaults.filterChipColors(
                         selectedContainerColor = CyberCyan.copy(alpha = 0.2f),
                         selectedLabelColor = CyberCyan,
@@ -194,7 +194,7 @@ fun LogsScreen(
                 FilterChip(
                     selected = selectedFilter == LogLevel.WARNING,
                     onClick = { selectedFilter = if (selectedFilter == LogLevel.WARNING) null else LogLevel.WARNING },
-                    label = { Text("WARN", fontSize = 11.sp) },
+                    label = { Text("ВНИМ", fontSize = 11.sp) },
                     colors = FilterChipDefaults.filterChipColors(
                         selectedContainerColor = CyberAmber.copy(alpha = 0.2f),
                         selectedLabelColor = CyberAmber,
@@ -205,7 +205,7 @@ fun LogsScreen(
                 FilterChip(
                     selected = selectedFilter == LogLevel.ERROR,
                     onClick = { selectedFilter = if (selectedFilter == LogLevel.ERROR) null else LogLevel.ERROR },
-                    label = { Text("ERR", fontSize = 11.sp) },
+                    label = { Text("ОШИБ", fontSize = 11.sp) },
                     colors = FilterChipDefaults.filterChipColors(
                         selectedContainerColor = CyberRed.copy(alpha = 0.2f),
                         selectedLabelColor = CyberRed,
@@ -238,12 +238,12 @@ fun LogsScreen(
                         )
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
-                            text = "No logs recorded yet",
+                            text = "Записи логов отсутствуют",
                             color = TextSecondary,
                             fontSize = 14.sp
                         )
                         Text(
-                            text = "Connect to a VPN server or run ping test to see activity logs.",
+                            text = "Подключитесь к VPN или запустите проверку пинга.",
                             color = TextSecondary.copy(alpha = 0.6f),
                             fontSize = 12.sp
                         )

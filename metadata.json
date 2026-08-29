@@ -1,5 +1,5 @@
 {
-  "name": "Xray flow",
+  "name": "XrayFlow",
   "description": "Xray VPN client supporting VLESS & VMess protocols, subscription links, per-app split tunneling, server grouping, and latency speed test.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]

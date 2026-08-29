@@ -87,13 +87,13 @@ fun ServersScreen(
             ) {
                 Column {
                     Text(
-                        text = "VPN Servers",
+                        text = "Серверы VPN",
                         fontSize = 22.sp,
                         fontWeight = FontWeight.Bold,
                         color = TextPrimary
                     )
                     Text(
-                        text = "${servers.size} nodes available",
+                        text = "Доступно узлов: ${servers.size}",
                         fontSize = 12.sp,
                         color = TextSecondary
                     )
@@ -121,11 +121,11 @@ fun ServersScreen(
                     } else {
                         Icon(
                             imageVector = Icons.Default.Speed,
-                            contentDescription = "Ping All",
+                            contentDescription = "Тест пинга",
                             modifier = Modifier.size(16.dp)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("Test All", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                        Text("Пинг всех", fontSize = 13.sp, fontWeight = FontWeight.Bold)
                     }
                 }
             }
@@ -139,12 +139,12 @@ fun ServersScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .testTag("server_search_input"),
-                placeholder = { Text("Search by country, name, or host...", color = TextSecondary) },
-                leadingIcon = { Icon(Icons.Default.Search, contentDescription = "Search", tint = TextSecondary) },
+                placeholder = { Text("Поиск по названию, хосту...", color = TextSecondary) },
+                leadingIcon = { Icon(Icons.Default.Search, contentDescription = "Поиск", tint = TextSecondary) },
                 trailingIcon = {
                     if (searchQuery.isNotEmpty()) {
                         IconButton(onClick = { searchQuery = "" }) {
-                            Icon(Icons.Default.Close, contentDescription = "Clear", tint = TextSecondary)
+                            Icon(Icons.Default.Close, contentDescription = "Очистить", tint = TextSecondary)
                         }
                     }
                 },
@@ -171,13 +171,13 @@ fun ServersScreen(
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Icon(
                             imageVector = Icons.Default.Dns,
-                            contentDescription = "No Servers",
+                            contentDescription = "Серверы не найдены",
                             tint = TextSecondary,
                             modifier = Modifier.size(48.dp)
                         )
                         Spacer(modifier = Modifier.height(12.dp))
                         Text(
-                            text = "No servers found",
+                            text = "Серверы не найдены",
                             fontSize = 16.sp,
                             fontWeight = FontWeight.Medium,
                             color = TextSecondary
@@ -198,13 +198,13 @@ fun ServersScreen(
                             ) {
                                 Icon(
                                     imageVector = Icons.Default.PushPin,
-                                    contentDescription = "Pinned",
+                                    contentDescription = "Закрепленные",
                                     tint = CyberCyan,
                                     modifier = Modifier.size(18.dp)
                                 )
                                 Spacer(modifier = Modifier.width(6.dp))
                                 Text(
-                                    text = "PINNED SERVERS",
+                                    text = "ЗАКРЕПЛЕННЫЕ СЕРВЕРЫ",
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.Bold,
                                     color = CyberCyan
@@ -240,7 +240,7 @@ fun ServersScreen(
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     Icon(
                                         imageVector = Icons.Default.FolderSpecial,
-                                        contentDescription = "Group",
+                                        contentDescription = "Группа",
                                         tint = CyberPurple,
                                         modifier = Modifier.size(18.dp)
                                     )
@@ -286,12 +286,12 @@ fun ServersScreen(
                                     } else {
                                         Icon(
                                             imageVector = Icons.Default.NetworkCheck,
-                                            contentDescription = "Ping Group",
+                                            contentDescription = "Пинг группы",
                                             tint = CyberPurple,
                                             modifier = Modifier.size(14.dp)
                                         )
                                         Spacer(modifier = Modifier.width(4.dp))
-                                        Text("Ping Group", fontSize = 11.sp, color = CyberPurple)
+                                        Text("Пинг группы", fontSize = 11.sp, color = CyberPurple)
                                     }
                                 }
                             }
@@ -318,9 +318,9 @@ fun ServersScreen(
         }
     }
 
-    // Add Manual Link Dialog
+    // Add Manual Link Bottom Sheet
     if (showAddDialog) {
-        AddServerDialog(
+        AddServerBottomSheet(
             onDismiss = { showAddDialog = false },
             onAdd = { link, group ->
                 viewModel.addServerManually(
@@ -451,58 +451,84 @@ fun ServerCard(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AddServerDialog(
+fun AddServerBottomSheet(
     onDismiss: () -> Unit,
     onAdd: (link: String, group: String) -> Unit
 ) {
     var linkText by remember { mutableStateOf("") }
-    var groupText by remember { mutableStateOf("Manual") }
+    var groupText by remember { mutableStateOf("Вручную") }
 
-    AlertDialog(
+    ModalBottomSheet(
         onDismissRequest = onDismiss,
         containerColor = CyberSurface,
-        title = {
-            Text("Add VLESS / VMess Server", color = TextPrimary, fontWeight = FontWeight.Bold)
-        },
-        text = {
-            Column {
-                Text("Paste your vless:// or vmess:// link:", fontSize = 13.sp, color = TextSecondary)
-                Spacer(modifier = Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = linkText,
-                    onValueChange = { linkText = it },
-                    placeholder = { Text("vless://...", fontSize = 12.sp, color = TextSecondary) },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("add_server_link_input"),
-                    shape = RoundedCornerShape(10.dp)
+        scrimColor = Color.Black.copy(alpha = 0.65f),
+        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+        dragHandle = { BottomSheetDefaults.DragHandle(color = TextSecondary.copy(alpha = 0.4f)) }
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 24.dp, vertical = 12.dp)
+        ) {
+            Text("Добавить узел VLESS / VMess", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 20.sp)
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Text("Вставьте ссылку vless:// или vmess://:", fontSize = 13.sp, color = TextSecondary)
+            Spacer(modifier = Modifier.height(6.dp))
+            OutlinedTextField(
+                value = linkText,
+                onValueChange = { linkText = it },
+                placeholder = { Text("vless://...", fontSize = 12.sp, color = TextSecondary) },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("add_server_link_input"),
+                shape = RoundedCornerShape(12.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = CyberCyan,
+                    unfocusedBorderColor = CyberSurfaceVariant
                 )
-                Spacer(modifier = Modifier.height(12.dp))
-                Text("Group Name:", fontSize = 13.sp, color = TextSecondary)
-                Spacer(modifier = Modifier.height(4.dp))
-                OutlinedTextField(
-                    value = groupText,
-                    onValueChange = { groupText = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(10.dp)
+            )
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            Text("Группа серверов:", fontSize = 13.sp, color = TextSecondary)
+            Spacer(modifier = Modifier.height(6.dp))
+            OutlinedTextField(
+                value = groupText,
+                onValueChange = { groupText = it },
+                placeholder = { Text("Вручную", fontSize = 12.sp, color = TextSecondary) },
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = CyberCyan,
+                    unfocusedBorderColor = CyberSurfaceVariant
                 )
-            }
-        },
-        confirmButton = {
-            Button(
-                onClick = { onAdd(linkText, groupText) },
-                enabled = linkText.isNotBlank(),
-                colors = ButtonDefaults.buttonColors(containerColor = CyberCyan, contentColor = Color.Black),
-                modifier = Modifier.testTag("confirm_add_server_btn")
+            )
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End
             ) {
-                Text("Add Node", fontWeight = FontWeight.Bold)
+                TextButton(onClick = onDismiss) {
+                    Text("Отмена", color = TextSecondary)
+                }
+                Spacer(modifier = Modifier.width(12.dp))
+                Button(
+                    onClick = { onAdd(linkText, groupText) },
+                    enabled = linkText.isNotBlank(),
+                    colors = ButtonDefaults.buttonColors(containerColor = CyberCyan, contentColor = Color.Black),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.testTag("confirm_add_server_btn")
+                ) {
+                    Text("Добавить узел", fontWeight = FontWeight.Bold)
+                }
             }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Cancel", color = TextSecondary)
-            }
+
+            Spacer(modifier = Modifier.height(16.dp))
         }
-    )
+    }
 }

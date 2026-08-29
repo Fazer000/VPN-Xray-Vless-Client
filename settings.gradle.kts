@@ -20,6 +20,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "Xray flow"
+rootProject.name = "XrayFlow"
 
 include(":app")

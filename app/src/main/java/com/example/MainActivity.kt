@@ -20,6 +20,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import com.example.ui.components.UpdateBottomSheet
 import com.example.ui.screens.HomeScreen
 import com.example.ui.screens.LogsScreen
 import com.example.ui.screens.ServersScreen
@@ -46,11 +47,11 @@ class MainActivity : ComponentActivity() {
 }
 
 sealed class NavItem(val route: String, val title: String, val icon: ImageVector) {
-    object Home : NavItem("home", "Connect", Icons.Default.Shield)
-    object Servers : NavItem("servers", "Servers", Icons.Default.Dns)
-    object Split : NavItem("split", "Split Tunnel", Icons.Default.AltRoute)
-    object Subscriptions : NavItem("subscriptions", "Subscriptions", Icons.Default.RssFeed)
-    object Logs : NavItem("logs", "Logs", Icons.Default.Terminal)
+    object Home : NavItem("home", "Главная", Icons.Default.Shield)
+    object Servers : NavItem("servers", "Серверы", Icons.Default.Dns)
+    object Split : NavItem("split", "Маршруты", Icons.Default.AltRoute)
+    object Subscriptions : NavItem("subscriptions", "Подписки", Icons.Default.RssFeed)
+    object Logs : NavItem("logs", "Логи", Icons.Default.Terminal)
 }
 
 @Composable
@@ -59,12 +60,27 @@ fun MainAppScreen(viewModel: VpnViewModel) {
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = navBackStackEntry?.destination?.route ?: NavItem.Home.route
 
+    val updateInfo by viewModel.updateInfo.collectAsState()
+    val isCheckingUpdate by viewModel.isCheckingUpdate.collectAsState()
+    val downloadState by viewModel.downloadState.collectAsState()
+
     val items = listOf(
         NavItem.Home,
         NavItem.Servers,
         NavItem.Split,
         NavItem.Subscriptions
     )
+
+    if (isCheckingUpdate || (updateInfo != null && updateInfo?.isUpdateAvailable == true)) {
+        UpdateBottomSheet(
+            updateInfo = updateInfo,
+            isChecking = isCheckingUpdate,
+            downloadState = downloadState,
+            onCheckUpdate = { viewModel.checkForAppUpdates() },
+            onDownloadAndUpdate = { url -> viewModel.startDownloadAndUpdate(url) },
+            onDismiss = { viewModel.dismissUpdateDialog() }
+        )
+    }
 
     Scaffold(
         modifier = Modifier.fillMaxSize(),

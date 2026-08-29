@@ -449,11 +449,6 @@ class XrayVpnService : VpnService() {
                     }
                 }
 
-                if (_vpnState.value == State.CONNECTED) {
-                    LogManager.i("XrayCore", "Go Xray Core loop exited. Shutting down VPN tunnel...")
-                    stopVpnTunnel()
-                }
-
             } catch (e: Exception) {
                 Log.e("XrayVpnService", "VPN Error: ${e.message}", e)
                 _vpnState.value = State.DISCONNECTED
